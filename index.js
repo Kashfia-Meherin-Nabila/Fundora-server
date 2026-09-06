@@ -135,6 +135,27 @@ async function run() {
     // ===============================
 // ADD NEW CAMPAIGN
 // ===============================
+app.get("/api/campaigns/creator/:email", async (req, res) => {
+  try {
+    const email = req.params.email;
+
+    const campaigns = await campaignCollection
+      .find({ creator_email: email })
+      .sort({ deadline: -1 })
+      .toArray();
+
+    res.status(200).send(campaigns);
+  } catch (error) {
+    console.error("Get creator campaigns error:", error);
+
+    res.status(500).send({
+      message: "Failed to fetch campaigns",
+      error: error.message,
+    });
+  }
+});
+
+
 
 app.post("/api/campaigns", async (req, res) => {
   try {
@@ -281,6 +302,128 @@ app.post("/api/campaigns", async (req, res) => {
   }
 });
 
+
+// ===============================
+// UPDATE CAMPAIGN
+// ===============================
+
+
+const { ObjectId } = require("mongodb");
+
+app.put("/api/campaigns/:id", async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    const {
+      campaign_title,
+      campaign_story,
+      category,
+      funding_goal,
+      minimum_contribution,
+      deadline,
+      reward_info,
+      campaign_image_url,
+    } = req.body;
+
+    if (
+      !campaign_title ||
+      !campaign_story ||
+      !category ||
+      !funding_goal ||
+      !minimum_contribution ||
+      !deadline ||
+      !reward_info ||
+      !campaign_image_url
+    ) {
+      return res.status(400).json({
+        success: false,
+        message: "All required fields are required.",
+      });
+    }
+
+    const result = await campaignCollection.updateOne(
+      {
+        _id: new ObjectId(id),
+      },
+      {
+        $set: {
+          campaign_title,
+          campaign_story,
+          category,
+          funding_goal: Number(funding_goal),
+          minimum_contribution: Number(
+            minimum_contribution
+          ),
+          deadline: new Date(deadline),
+          reward_info,
+          campaign_image_url,
+          updatedAt: new Date(),
+        },
+      }
+    );
+
+    if (result.matchedCount === 0) {
+      return res.status(404).json({
+        success: false,
+        message: "Campaign not found.",
+      });
+    }
+
+    res.status(200).json({
+      success: true,
+      message: "Campaign updated successfully.",
+    });
+
+  } catch (error) {
+    console.error("Update campaign error:", error);
+
+    res.status(500).json({
+      success: false,
+      message: "Failed to update campaign.",
+      error: error.message,
+    });
+  }
+});
+
+// ===============================
+// DELETE CAMPAIGN
+// ===============================
+app.delete("/api/campaigns/:id", async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    if (!ObjectId.isValid(id)) {
+      return res.status(400).json({
+        success: false,
+        message: "Invalid campaign ID.",
+      });
+    }
+
+    const result = await campaignCollection.deleteOne({
+      _id: new ObjectId(id),
+    });
+
+    if (result.deletedCount === 0) {
+      return res.status(404).json({
+        success: false,
+        message: "Campaign not found.",
+      });
+    }
+
+    res.status(200).json({
+      success: true,
+      message: "Campaign deleted successfully.",
+    });
+  } catch (error) {
+    console.error("Delete campaign error:", error);
+
+    res.status(500).json({
+      success: false,
+      message: "Failed to delete campaign.",
+      error: error.message,
+    });
+  }
+});
 
     // Send a ping to confirm a successful connection
     await client.db("admin").command({ ping: 1 });
