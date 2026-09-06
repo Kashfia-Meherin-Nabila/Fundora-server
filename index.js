@@ -133,6 +133,49 @@ async function run() {
     });
 
     // ===============================
+// Creator Dashboard Statistics
+// ===============================
+app.get("/api/creator/stats/:email", async (req, res) => {
+  try {
+    const email = req.params.email.toLowerCase();
+
+    const campaigns = await campaignCollection
+      .find({ creator_email: email })
+      .toArray();
+
+    const totalCampaigns = campaigns.length;
+
+    const now = new Date();
+
+    const activeCampaigns = campaigns.filter((campaign) => {
+      return (
+        campaign.status === "approved" &&
+        new Date(campaign.deadline) > now
+      );
+    }).length;
+
+    const totalRaised = campaigns.reduce((total, campaign) => {
+      return total + Number(campaign.raised_amount || 0);
+    }, 0);
+
+    res.status(200).json({
+      totalCampaigns,
+      activeCampaigns,
+      totalRaised,
+    });
+  } catch (error) {
+    console.error("Creator stats error:", error);
+
+    res.status(500).json({
+      success: false,
+      message: "Failed to fetch creator statistics.",
+    });
+  }
+});
+
+
+
+    // ===============================
 // ADD NEW CAMPAIGN
 // ===============================
 app.get("/api/campaigns/creator/:email", async (req, res) => {
@@ -303,6 +346,30 @@ app.post("/api/campaigns", async (req, res) => {
 });
 
 
+app.get("/api/creator/pending-contributions/:email", async (req, res) => {
+  try {
+    const email = req.params.email.toLowerCase();
+
+    const contributions = await db
+      .collection("contributions")
+      .find({
+        creator_email: email,
+        status: "pending",
+      })
+      .sort({ createdAt: -1 })
+      .toArray();
+
+    res.status(200).json(contributions);
+  } catch (error) {
+    console.error("Pending contributions error:", error);
+
+    res.status(500).json({
+      success: false,
+      message: "Failed to fetch pending contributions.",
+    });
+  }
+});
+
 // ===============================
 // UPDATE CAMPAIGN
 // ===============================
@@ -421,6 +488,148 @@ app.delete("/api/campaigns/:id", async (req, res) => {
       success: false,
       message: "Failed to delete campaign.",
       error: error.message,
+    });
+  }
+});
+
+// ===============================
+// CREATE WITHDRAWAL
+// ===============================
+app.post("/api/withdrawals", async (req, res) => {
+  try {
+    const {
+      creator_email,
+      creator_name,
+      withdrawal_credit,
+      withdrawal_amount,
+      payment_system,
+      account_number,
+      withdraw_date,
+    } = req.body;
+
+    if (
+      !creator_email ||
+      !creator_name ||
+      !withdrawal_credit ||
+      !withdrawal_amount ||
+      !payment_system ||
+      !account_number
+    ) {
+      return res.status(400).json({
+        success: false,
+        message: "All withdrawal fields are required.",
+      });
+    }
+
+    const credits = Number(withdrawal_credit);
+
+    // Minimum 200 credits
+    if (credits < 200) {
+      return res.status(400).json({
+        success: false,
+        message: "Minimum withdrawal is 200 credits.",
+      });
+    }
+
+    // Must be multiple of 20
+    if (credits % 20 !== 0) {
+      return res.status(400).json({
+        success: false,
+        message: "Withdrawal credits must be a multiple of 20.",
+      });
+    }
+
+    // Get creator
+    const creator = await userCollection.findOne({
+      email: creator_email,
+    });
+
+    if (!creator) {
+      return res.status(404).json({
+        success: false,
+        message: "Creator not found.",
+      });
+    }
+
+    if (creator.role !== "Creator") {
+      return res.status(403).json({
+        success: false,
+        message: "Only creators can withdraw.",
+      });
+    }
+
+    // Check credits
+    if (Number(creator.credits) < credits) {
+      return res.status(400).json({
+        success: false,
+        message: "Insufficient credits.",
+      });
+    }
+
+    // Calculate amount from backend
+    const amount = credits / 20;
+
+    const withdrawal = {
+      creator_email,
+      creator_name,
+      withdrawal_credit: credits,
+      withdrawal_amount: amount,
+      payment_system,
+      account_number,
+      withdraw_date: new Date(withdraw_date || Date.now()),
+      status: "pending",
+      createdAt: new Date(),
+    };
+
+    // Save withdrawal
+    const result = await db
+      .collection("withdrawals")
+      .insertOne(withdrawal);
+
+    // Deduct credits immediately
+    await userCollection.updateOne(
+      { email: creator_email },
+      {
+        $inc: {
+          credits: -credits,
+        },
+      }
+    );
+
+    res.status(201).json({
+      success: true,
+      message: "Withdrawal request submitted successfully.",
+      withdrawalId: result.insertedId,
+    });
+  } catch (error) {
+    console.error("Withdrawal error:", error);
+
+    res.status(500).json({
+      success: false,
+      message: "Failed to create withdrawal.",
+      error: error.message,
+    });
+  }
+});
+
+// Get creator payment history
+app.get("/api/withdrawals/creator/:email", async (req, res) => {
+  try {
+    const email = req.params.email.toLowerCase();
+
+    const withdrawals = await db
+      .collection("withdrawals")
+      .find({ creator_email: email })
+      .sort({ withdraw_date: -1 })
+      .toArray();
+
+    res.status(200).json(withdrawals);
+  } catch (error) {
+    console.error("Payment history error:", error);
+
+    res.status(500).json({
+      success: false,
+      message: "Failed to fetch payment history.",
     });
   }
 });
