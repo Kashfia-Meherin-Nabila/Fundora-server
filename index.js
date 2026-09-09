@@ -963,12 +963,12 @@ app.post("/api/contributions", async (req, res) => {
       supporter.credits || 0
     );
 
-    console.log("=================================");
-    console.log("Supporter:", supporter.email);
-    console.log("Supporter ID:", supporter._id);
-    console.log("Current credits:", currentCredits);
-    console.log("Contribution amount:", amount);
-    console.log("=================================");
+    // console.log("=================================");
+    // console.log("Supporter:", supporter.email);
+    // console.log("Supporter ID:", supporter._id);
+    // console.log("Current credits:", currentCredits);
+    // console.log("Contribution amount:", amount);
+    // console.log("=================================");
 
     if (currentCredits < amount) {
       return res.status(400).json({
@@ -1091,6 +1091,36 @@ app.post("/api/contributions", async (req, res) => {
       message:
         "Failed to create contribution.",
       error: error.message,
+    });
+  }
+});
+
+// ===============================
+// SUPPORTER MY CONTRIBUTIONS
+// ===============================
+app.get("/api/contributions/supporter/:email", async (req, res) => {
+  try {
+    const email = req.params.email.toLowerCase();
+
+    const contributions = await contributionCollection
+      .find({
+        Supporter_email: email,
+      })
+      .sort({
+        current_date: -1,
+      })
+      .toArray();
+
+    res.status(200).json({
+      success: true,
+      contributions,
+    });
+  } catch (error) {
+    console.error("My contributions error:", error);
+
+    res.status(500).json({
+      success: false,
+      message: "Failed to fetch contributions.",
     });
   }
 });
