@@ -10,7 +10,7 @@ require("dotenv").config();
 app.use(cors());
 app.use(express.json());
 
-const { MongoClient, ServerApiVersion } = require("mongodb");
+const { MongoClient, ServerApiVersion, ObjectId } = require("mongodb");
 const uri = process.env.MONGODB_URI;
 
 // Create a MongoClient with a MongoClientOptions object to set the Stable API version
@@ -30,6 +30,7 @@ async function run() {
     const db = client.db(process.env.AUTH_DB_NAME);
     const userCollection = db.collection("user");
     const campaignCollection = db.collection("campaigns");
+    const contributionCollection = db.collection("contributions");
 
     // registration user
     app.post("/api/users/register", async (req, res) => {
@@ -135,6 +136,9 @@ async function run() {
     // ===============================
 // Creator Dashboard Statistics
 // ===============================
+// ===============================
+// Creator Dashboard Statistics
+// ===============================
 app.get("/api/creator/stats/:email", async (req, res) => {
   try {
     const email = req.params.email.toLowerCase();
@@ -154,9 +158,25 @@ app.get("/api/creator/stats/:email", async (req, res) => {
       );
     }).length;
 
-    const totalRaised = campaigns.reduce((total, campaign) => {
-      return total + Number(campaign.raised_amount || 0);
-    }, 0);
+    // Get approved contributions of this creator
+    const approvedContributions =
+      await contributionCollection
+        .find({
+          creator_email: email,
+          status: "approved",
+        })
+        .toArray();
+
+    // Calculate total raised from Contribution_amount
+    const totalRaised = approvedContributions.reduce(
+      (total, contribution) => {
+        return (
+          total +
+          Number(contribution.Contribution_amount || 0)
+        );
+      },
+      0
+    );
 
     res.status(200).json({
       totalCampaigns,
@@ -375,7 +395,7 @@ app.get("/api/creator/pending-contributions/:email", async (req, res) => {
 // ===============================
 
 
-const { ObjectId } = require("mongodb");
+
 
 app.put("/api/campaigns/:id", async (req, res) => {
   try {
@@ -633,6 +653,451 @@ app.get("/api/withdrawals/creator/:email", async (req, res) => {
     });
   }
 });
+
+// ===============================
+// SUPPORTER HOME DASHBOARD
+// ===============================
+
+app.get("/api/supporter/dashboard/:email", async (req, res) => {
+  try {
+    const email = req.params.email.toLowerCase();
+
+    const contributionCollection = db.collection("contributions");
+
+    // Get all contributions made by this supporter
+    const contributions = await contributionCollection
+      .find({
+        Supporter_email: email,
+      })
+      .sort({ current_date: -1 })
+      .toArray();
+
+    // Total contributions
+    const totalContributions = contributions.length;
+
+    // Pending contributions
+    const totalPending = contributions.filter(
+      (contribution) => contribution.status === "pending"
+    ).length;
+
+    // Total approved amount
+    const totalAmountContributed = contributions
+      .filter((contribution) => contribution.status === "approved")
+      .reduce(
+        (total, contribution) =>
+          total + Number(contribution.Contribution_amount || 0),
+        0
+      );
+
+    // Only approved contributions for table
+    const approvedContributions = contributions.filter(
+      (contribution) => contribution.status === "approved"
+    );
+
+    res.status(200).json({
+      totalContributions,
+      totalPending,
+      totalAmountContributed,
+      approvedContributions,
+    });
+  } catch (error) {
+    console.error("Supporter dashboard error:", error);
+
+    res.status(500).json({
+      success: false,
+      message: "Failed to load supporter dashboard.",
+    });
+  }
+});
+
+// ===============================
+// PUBLIC EXPLORE CAMPAIGNS
+// ===============================
+
+// ===============================
+// PUBLIC EXPLORE CAMPAIGNS
+// ===============================
+app.get("/api/campaigns/explore", async (req, res) => {
+  try {
+    const now = new Date();
+
+    const campaigns = await campaignCollection
+      .find({
+        status: "approved",
+        deadline: { $gt: now },
+      })
+      .sort({ createdAt: -1 })
+      .toArray();
+
+    // Calculate raised amount for every campaign
+    const campaignsWithRaisedAmount = await Promise.all(
+      campaigns.map(async (campaign) => {
+        const contributions =
+          await contributionCollection
+            .find({
+              campaign_id: campaign._id,
+
+              // Count pending + approved
+              // Do not count rejected
+              status: {
+                $in: ["pending", "approved"],
+              },
+            })
+            .toArray();
+
+        const raisedAmount = contributions.reduce(
+          (total, contribution) => {
+            return (
+              total +
+              Number(
+                contribution.Contribution_amount || 0
+              )
+            );
+          },
+          0
+        );
+
+        return {
+          ...campaign,
+          raised_amount: raisedAmount,
+        };
+      })
+    );
+
+    res.status(200).json(campaignsWithRaisedAmount);
+  } catch (error) {
+    console.error(
+      "Explore campaigns error:",
+      error
+    );
+
+    res.status(500).json({
+      success: false,
+      message: "Failed to fetch campaigns.",
+    });
+  }
+});
+
+
+// ===============================
+// GET SINGLE CAMPAIGN BY ID
+// ===============================
+
+app.get("/api/campaigns/:id", async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    if (!ObjectId.isValid(id)) {
+      return res.status(400).json({
+        success: false,
+        message: "Invalid campaign ID.",
+      });
+    }
+
+    const campaignId = new ObjectId(id);
+
+    const campaign = await campaignCollection.findOne({
+      _id: campaignId,
+    });
+
+    if (!campaign) {
+      return res.status(404).json({
+        success: false,
+        message: "Campaign not found.",
+      });
+    }
+
+    // Pending + approved contributions count toward raised
+    const contributions =
+      await contributionCollection
+        .find({
+          campaign_id: campaignId,
+          status: {
+            $in: ["pending", "approved"],
+          },
+        })
+        .toArray();
+
+    const raisedAmount = contributions.reduce(
+      (total, contribution) => {
+        return (
+          total +
+          Number(
+            contribution.Contribution_amount || 0
+          )
+        );
+      },
+      0
+    );
+
+    res.status(200).json({
+      ...campaign,
+      raised_amount: raisedAmount,
+    });
+  } catch (error) {
+    console.error(
+      "Get campaign details error:",
+      error
+    );
+
+    res.status(500).json({
+      success: false,
+      message: "Failed to load campaign.",
+      error: error.message,
+    });
+  }
+});
+
+// ===============================
+// CREATE CONTRIBUTION
+// ===============================
+app.post("/api/contributions", async (req, res) => {
+  try {
+    const {
+      campaign_id,
+      campaign_title,
+      Contribution_amount,
+      Supporter_email,
+      Supporter_name,
+      creator_name,
+      creator_email,
+    } = req.body;
+
+    // =========================
+    // VALIDATION
+    // =========================
+    if (
+      !campaign_id ||
+      !campaign_title ||
+      Contribution_amount === undefined ||
+      !Supporter_email ||
+      !Supporter_name ||
+      !creator_name ||
+      !creator_email
+    ) {
+      return res.status(400).json({
+        success: false,
+        message: "All required fields are needed.",
+      });
+    }
+
+    if (!ObjectId.isValid(campaign_id)) {
+      return res.status(400).json({
+        success: false,
+        message: "Invalid campaign ID.",
+      });
+    }
+
+    const amount = Number(Contribution_amount);
+
+    if (!Number.isFinite(amount) || amount <= 0) {
+      return res.status(400).json({
+        success: false,
+        message: "Contribution amount must be greater than 0.",
+      });
+    }
+
+    // =========================
+    // GET CAMPAIGN
+    // =========================
+    const campaign = await campaignCollection.findOne({
+      _id: new ObjectId(campaign_id),
+    });
+
+    if (!campaign) {
+      return res.status(404).json({
+        success: false,
+        message: "Campaign not found.",
+      });
+    }
+
+    if (campaign.status !== "approved") {
+      return res.status(400).json({
+        success: false,
+        message: "This campaign is not available for contribution.",
+      });
+    }
+
+    if (new Date(campaign.deadline) <= new Date()) {
+      return res.status(400).json({
+        success: false,
+        message: "This campaign deadline has passed.",
+      });
+    }
+
+    if (
+      amount <
+      Number(campaign.minimum_contribution)
+    ) {
+      return res.status(400).json({
+        success: false,
+        message: `Minimum contribution is ${campaign.minimum_contribution} credits.`,
+      });
+    }
+
+    // =========================
+    // GET SUPPORTER
+    // =========================
+    const supporter = await userCollection.findOne({
+      email: Supporter_email.toLowerCase(),
+    });
+
+    if (!supporter) {
+      return res.status(404).json({
+        success: false,
+        message: "Supporter not found.",
+      });
+    }
+
+    if (supporter.role !== "Supporter") {
+      return res.status(403).json({
+        success: false,
+        message: "Only supporters can contribute.",
+      });
+    }
+
+    // =========================
+    // CHECK CREDITS
+    // =========================
+    const currentCredits = Number(
+      supporter.credits || 0
+    );
+
+    console.log("=================================");
+    console.log("Supporter:", supporter.email);
+    console.log("Supporter ID:", supporter._id);
+    console.log("Current credits:", currentCredits);
+    console.log("Contribution amount:", amount);
+    console.log("=================================");
+
+    if (currentCredits < amount) {
+      return res.status(400).json({
+        success: false,
+        message: "You do not have enough credits.",
+      });
+    }
+
+    // =========================
+    // DEDUCT SUPPORTER CREDITS
+    // =========================
+    const creditUpdate =
+      await userCollection.updateOne(
+        {
+          _id: supporter._id,
+          credits: { $gte: amount },
+        },
+        {
+          $inc: {
+            credits: -amount,
+          },
+        }
+      );
+
+    console.log(
+      "Credit update result:",
+      creditUpdate
+    );
+
+    if (creditUpdate.modifiedCount !== 1) {
+      return res.status(400).json({
+        success: false,
+        message: "Failed to deduct credits.",
+      });
+    }
+
+    // =========================
+    // CHECK UPDATED USER
+    // =========================
+    const updatedSupporter =
+      await userCollection.findOne({
+        _id: supporter._id,
+      });
+
+    console.log(
+      "Updated supporter:",
+      updatedSupporter
+    );
+
+    // =========================
+    // CREATE CONTRIBUTION
+    // =========================
+    const contribution = {
+      campaign_id: campaign._id,
+      campaign_title: campaign.campaign_title,
+      Contribution_amount: amount,
+
+      Supporter_email: supporter.email,
+      Supporter_name: supporter.name,
+
+      creator_name: campaign.creator_name,
+      creator_email: campaign.creator_email,
+
+      current_date: new Date(),
+
+      status: "pending",
+    };
+
+    const result =
+      await contributionCollection.insertOne(
+        contribution
+      );
+
+    // =========================
+    // UPDATE CAMPAIGN RAISED
+    // =========================
+    await campaignCollection.updateOne(
+      {
+        _id: campaign._id,
+      },
+      {
+        $inc: {
+          raised_amount: amount,
+        },
+        $set: {
+          updatedAt: new Date(),
+        },
+      }
+    );
+
+    // =========================
+    // RESPONSE
+    // =========================
+    res.status(201).json({
+      success: true,
+
+      message:
+        "Contribution submitted successfully. Credits deducted and campaign raised amount updated.",
+
+      contributionId: result.insertedId,
+
+      deductedCredits: amount,
+
+      remainingCredits:
+        Number(updatedSupporter.credits),
+
+      newRaisedAmount:
+        Number(campaign.raised_amount || 0) +
+        amount,
+    });
+
+  } catch (error) {
+    console.error(
+      "Contribution error:",
+      error
+    );
+
+    res.status(500).json({
+      success: false,
+      message:
+        "Failed to create contribution.",
+      error: error.message,
+    });
+  }
+});
+
+
+
+
 
     // Send a ping to confirm a successful connection
     await client.db("admin").command({ ping: 1 });
