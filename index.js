@@ -36,6 +36,7 @@ async function run() {
     const userCollection = db.collection("user");
     const campaignCollection = db.collection("campaigns");
     const contributionCollection = db.collection("contributions");
+    const reportsCollection = db.collection("reports");
 
     // ===============================
     // STRIPE WEBHOOK
@@ -76,13 +77,13 @@ async function run() {
 
       try {
         if (event.type === "invoice.paid") {
-          console.log("💰💰 INVOICE.PAID RECEIVED 💰💰");
+          //console.log("💰💰 INVOICE.PAID RECEIVED 💰💰");
 
           const invoice = event.data.object;
 
-          console.log("Invoice ID:", invoice.id);
-          console.log("Customer ID:", invoice.customer);
-          console.log("Amount paid:", invoice.amount_paid);
+          // console.log("Invoice ID:", invoice.id);
+          // console.log("Customer ID:", invoice.customer);
+          // console.log("Amount paid:", invoice.amount_paid);
 
           // ==========================================
           // CREDIT PACKAGES
@@ -1474,6 +1475,71 @@ app.get("/api/admin/stats", async (req, res) => {
   }
 });
 
+// =========================
+// ADMIN - GET ALL CAMPAIGNS
+// =========================
+app.get("/api/admin/campaigns", async (req, res) => {
+  try {
+    const campaigns = await campaignCollection
+      .find({})
+      .sort({ createdAt: -1 })
+      .toArray();
+
+    res.status(200).json({
+      success: true,
+      campaigns,
+    });
+  } catch (error) {
+    console.error("Admin campaigns error:", error);
+
+    res.status(500).json({
+      success: false,
+      message: "Failed to load campaigns.",
+      error: error.message,
+    });
+  }
+});
+
+// =========================
+// ADMIN - DELETE CAMPAIGN
+// =========================
+app.delete("/api/admin/campaigns/:id", async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    if (!ObjectId.isValid(id)) {
+      return res.status(400).json({
+        success: false,
+        message: "Invalid campaign ID.",
+      });
+    }
+
+    const result = await campaignCollection.deleteOne({
+      _id: new ObjectId(id),
+    });
+
+    if (result.deletedCount === 0) {
+      return res.status(404).json({
+        success: false,
+        message: "Campaign not found.",
+      });
+    }
+
+    res.status(200).json({
+      success: true,
+      message: "Campaign deleted successfully.",
+    });
+  } catch (error) {
+    console.error("Admin delete campaign error:", error);
+
+    res.status(500).json({
+      success: false,
+      message: "Failed to delete campaign.",
+      error: error.message,
+    });
+  }
+});
+
 
 // ==================== ADMIN - PENDING CAMPAIGNS ====================
 
@@ -1908,7 +1974,182 @@ app.delete("/api/admin/users/:id", async (req, res) => {
     });
   }
 });
-    
+
+
+// =========================
+// ADMIN - GET ALL REPORTS
+// =========================
+app.get("/api/admin/reports", async (req, res) => {
+  try {
+    const reports = await reportsCollection
+      .find({})
+      .sort({ createdAt: -1 })
+      .toArray();
+
+    res.status(200).json({
+      success: true,
+      reports,
+    });
+  } catch (error) {
+    console.error("Admin reports error:", error);
+
+    res.status(500).json({
+      success: false,
+      message: "Failed to load reports.",
+      error: error.message,
+    });
+  }
+});
+
+// =========================
+// ADMIN - SUSPEND CAMPAIGN
+// =========================
+app.put("/api/admin/reports/:id/suspend", async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    if (!ObjectId.isValid(id)) {
+      return res.status(400).json({
+        success: false,
+        message: "Invalid report ID.",
+      });
+    }
+
+    const report = await reportsCollection.findOne({
+      _id: new ObjectId(id),
+    });
+
+    if (!report) {
+      return res.status(404).json({
+        success: false,
+        message: "Report not found.",
+      });
+    }
+
+    if (!ObjectId.isValid(report.campaign_id)) {
+      return res.status(400).json({
+        success: false,
+        message: "Invalid campaign ID.",
+      });
+    }
+
+    const campaignResult = await campaignCollection.updateOne(
+      {
+        _id: new ObjectId(report.campaign_id),
+      },
+      {
+        $set: {
+          status: "suspended",
+          updatedAt: new Date(),
+        },
+      }
+    );
+
+    if (campaignResult.matchedCount === 0) {
+      return res.status(404).json({
+        success: false,
+        message: "Campaign not found.",
+      });
+    }
+
+    await reportsCollection.updateOne(
+      {
+        _id: new ObjectId(id),
+      },
+      {
+        $set: {
+          status: "suspended",
+          handledAt: new Date(),
+        },
+      }
+    );
+
+    res.status(200).json({
+      success: true,
+      message: "Campaign suspended successfully.",
+    });
+  } catch (error) {
+    console.error("Suspend campaign error:", error);
+
+    res.status(500).json({
+      success: false,
+      message: "Failed to suspend campaign.",
+      error: error.message,
+    });
+  }
+});
+
+// =========================
+// ADMIN - DELETE REPORTED CAMPAIGN
+// =========================
+app.delete("/api/admin/reports/:id/campaign", async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    if (!ObjectId.isValid(id)) {
+      return res.status(400).json({
+        success: false,
+        message: "Invalid report ID.",
+      });
+    }
+
+    const report = await reportsCollection.findOne({
+      _id: new ObjectId(id),
+    });
+
+    if (!report) {
+      return res.status(404).json({
+        success: false,
+        message: "Report not found.",
+      });
+    }
+
+    if (!ObjectId.isValid(report.campaign_id)) {
+      return res.status(400).json({
+        success: false,
+        message: "Invalid campaign ID.",
+      });
+    }
+
+    const campaignResult = await campaignCollection.deleteOne({
+      _id: new ObjectId(report.campaign_id),
+    });
+
+    if (campaignResult.deletedCount === 0) {
+      return res.status(404).json({
+        success: false,
+        message: "Campaign not found.",
+      });
+    }
+
+    await reportsCollection.updateOne(
+      {
+        _id: new ObjectId(id),
+      },
+      {
+        $set: {
+          status: "deleted",
+          handledAt: new Date(),
+        },
+      }
+    );
+
+    res.status(200).json({
+      success: true,
+      message: "Campaign deleted successfully.",
+    });
+  } catch (error) {
+    console.error("Delete reported campaign error:", error);
+
+    res.status(500).json({
+      success: false,
+      message: "Failed to delete campaign.",
+      error: error.message,
+    });
+  }
+});
+
+
 
     // Send a ping to confirm a successful connection
     await client.db("admin").command({ ping: 1 });
