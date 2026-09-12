@@ -1653,6 +1653,261 @@ app.put("/api/admin/campaigns/:id/reject", async (req, res) => {
     });
   }
 });
+
+// ==================== ADMIN - PENDING WITHDRAWALS ====================
+
+app.get("/api/admin/withdrawals/pending", async (req, res) => {
+  try {
+    const withdrawalsCollection = db.collection("withdrawals");
+
+    const withdrawals = await withdrawalsCollection
+      .find({
+        status: "pending",
+      })
+      .sort({
+        createdAt: -1,
+      })
+      .toArray();
+
+    res.status(200).json({
+      success: true,
+      withdrawals,
+    });
+  } catch (error) {
+    console.error("Pending withdrawals error:", error);
+
+    res.status(500).json({
+      success: false,
+      message: "Failed to load pending withdrawal requests.",
+    });
+  }
+});
+
+// ==================== ADMIN - APPROVE WITHDRAWAL ====================
+
+app.put("/api/admin/withdrawals/:id/approve", async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    if (!ObjectId.isValid(id)) {
+      return res.status(400).json({
+        success: false,
+        message: "Invalid withdrawal ID.",
+      });
+    }
+
+    const withdrawalsCollection =
+      db.collection("withdrawals");
+
+    const withdrawal = await withdrawalsCollection.findOne({
+      _id: new ObjectId(id),
+    });
+
+    if (!withdrawal) {
+      return res.status(404).json({
+        success: false,
+        message: "Withdrawal request not found.",
+      });
+    }
+
+    if (withdrawal.status !== "pending") {
+      return res.status(400).json({
+        success: false,
+        message: "Only pending withdrawals can be approved.",
+      });
+    }
+
+    const amount = Number(
+      withdrawal.amount ||
+      withdrawal.withdrawal_amount ||
+      withdrawal.credits ||
+      0
+    );
+
+    if (amount <= 0) {
+      return res.status(400).json({
+        success: false,
+        message: "Invalid withdrawal amount.",
+      });
+    }
+
+    const creatorEmail =
+      withdrawal.creator_email ||
+      withdrawal.email;
+
+    if (!creatorEmail) {
+      return res.status(400).json({
+        success: false,
+        message: "Creator email is missing.",
+      });
+    }
+
+    // Find creator
+    const creator = await userCollection.findOne({
+      email: creatorEmail.toLowerCase(),
+      role: "Creator",
+    });
+
+    if (!creator) {
+      return res.status(404).json({
+        success: false,
+        message: "Creator not found.",
+      });
+    }
+
+    // Make sure creator has enough credits
+    if ((creator.credits || 0) < amount) {
+      return res.status(400).json({
+        success: false,
+        message:
+          "Creator does not have enough available credits.",
+      });
+    }
+
+    // Deduct creator credits
+    const creditResult = await userCollection.updateOne(
+      {
+        _id: creator._id,
+        credits: {
+          $gte: amount,
+        },
+      },
+      {
+        $inc: {
+          credits: -amount,
+        },
+      }
+    );
+
+    if (creditResult.modifiedCount === 0) {
+      return res.status(400).json({
+        success: false,
+        message:
+          "Failed to deduct creator credits.",
+      });
+    }
+
+    // Approve withdrawal
+    const withdrawalResult =
+      await withdrawalsCollection.updateOne(
+        {
+          _id: new ObjectId(id),
+          status: "pending",
+        },
+        {
+          $set: {
+            status: "approved",
+            approvedAt: new Date(),
+          },
+        }
+      );
+
+    if (withdrawalResult.modifiedCount === 0) {
+      // Refund credits if withdrawal update failed
+      await userCollection.updateOne(
+        {
+          _id: creator._id,
+        },
+        {
+          $inc: {
+            credits: amount,
+          },
+        }
+      );
+
+      return res.status(400).json({
+        success: false,
+        message: "Failed to approve withdrawal.",
+      });
+    }
+
+    res.status(200).json({
+      success: true,
+      message: "Withdrawal payment marked as successful.",
+    });
+  } catch (error) {
+    console.error("Approve withdrawal error:", error);
+
+    res.status(500).json({
+      success: false,
+      message: "Failed to process withdrawal.",
+    });
+  }
+});
+
+// ==================== ADMIN - GET ALL USERS ====================
+
+app.get("/api/admin/users", async (req, res) => {
+  try {
+    const users = await userCollection
+      .find({})
+      .sort({
+        createdAt: -1,
+      })
+      .toArray();
+
+    res.status(200).json({
+      success: true,
+      users,
+    });
+  } catch (error) {
+    console.error("Admin users error:", error);
+
+    res.status(500).json({
+      success: false,
+      message: "Failed to load users.",
+    });
+  }
+});
+
+// ==================== ADMIN - DELETE USER ====================
+
+app.delete("/api/admin/users/:id", async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    if (!ObjectId.isValid(id)) {
+      return res.status(400).json({
+        success: false,
+        message: "Invalid user ID.",
+      });
+    }
+
+    const user = await userCollection.findOne({
+      _id: new ObjectId(id),
+    });
+
+    if (!user) {
+      return res.status(404).json({
+        success: false,
+        message: "User not found.",
+      });
+    }
+
+    const result = await userCollection.deleteOne({
+      _id: new ObjectId(id),
+    });
+
+    if (result.deletedCount === 0) {
+      return res.status(400).json({
+        success: false,
+        message: "Failed to delete user.",
+      });
+    }
+
+    res.status(200).json({
+      success: true,
+      message: "User deleted successfully.",
+    });
+  } catch (error) {
+    console.error("Delete user error:", error);
+
+    res.status(500).json({
+      success: false,
+      message: "Failed to delete user.",
+    });
+  }
+});
     
 
     // Send a ping to confirm a successful connection
