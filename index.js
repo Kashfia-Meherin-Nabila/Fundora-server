@@ -387,6 +387,8 @@ async function run() {
       }
     });
 
+
+    
     // registration user
     app.post("/api/users/register", async (req, res) => {
       try {
@@ -1384,6 +1386,273 @@ async function run() {
       }
     });
 
+// ===============================
+// ADMIN DASHBOARD STATS
+// ===============================
+
+app.get("/api/admin/stats", async (req, res) => {
+  try {
+    // ===============================
+    // TOTAL SUPPORTERS
+    // ===============================
+
+    const totalSupporters =
+      await userCollection.countDocuments({
+        role: "Supporter",
+      });
+
+    // ===============================
+    // TOTAL CREATORS
+    // ===============================
+
+    const totalCreators =
+      await userCollection.countDocuments({
+        role: "Creator",
+      });
+
+    // ===============================
+    // TOTAL AVAILABLE CREDITS
+    // ===============================
+
+    const creditsResult =
+      await userCollection
+        .aggregate([
+          {
+            $group: {
+              _id: null,
+
+              totalCredits: {
+                $sum: {
+                  $ifNull: ["$credits", 0],
+                },
+              },
+            },
+          },
+        ])
+        .toArray();
+
+    const totalAvailableCredits =
+      creditsResult[0]?.totalCredits || 0;
+
+    // ===============================
+    // TOTAL PAYMENTS PROCESSED
+    // ===============================
+
+    const paymentsCollection =
+      db.collection("payments");
+
+    const totalPaymentsProcessed =
+      await paymentsCollection.countDocuments({
+        payment_status: "success",
+      });
+
+    // ===============================
+    // RESPONSE
+    // ===============================
+
+    res.status(200).json({
+      success: true,
+
+      stats: {
+        totalSupporters,
+        totalCreators,
+        totalAvailableCredits,
+        totalPaymentsProcessed,
+      },
+    });
+  } catch (error) {
+    console.error(
+      "Admin stats error:",
+      error
+    );
+
+    res.status(500).json({
+      success: false,
+      message: "Failed to load admin statistics.",
+      error: error.message,
+    });
+  }
+});
+
+
+// ==================== ADMIN - PENDING CAMPAIGNS ====================
+
+app.get("/api/admin/campaigns/pending", async (req, res) => {
+  try {
+    const campaigns = await campaignCollection
+      .find({
+        status: "pending",
+      })
+      .sort({
+        createdAt: -1,
+      })
+      .toArray();
+
+    res.status(200).json({
+      success: true,
+      campaigns,
+    });
+  } catch (error) {
+    console.error("Pending campaigns error:", error);
+
+    res.status(500).json({
+      success: false,
+      message: "Failed to load pending campaigns.",
+    });
+  }
+});
+
+
+// ==================== ADMIN - APPROVE CAMPAIGN ====================
+
+app.put("/api/admin/campaigns/:id/approve", async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    if (!ObjectId.isValid(id)) {
+      return res.status(400).json({
+        success: false,
+        message: "Invalid campaign ID.",
+      });
+    }
+
+    const campaign = await campaignCollection.findOne({
+      _id: new ObjectId(id),
+    });
+
+    if (!campaign) {
+      return res.status(404).json({
+        success: false,
+        message: "Campaign not found.",
+      });
+    }
+
+    if (campaign.status !== "pending") {
+      return res.status(400).json({
+        success: false,
+        message: "Only pending campaigns can be approved.",
+      });
+    }
+
+    const result = await campaignCollection.updateOne(
+      {
+        _id: new ObjectId(id),
+        status: "pending",
+      },
+      {
+        $set: {
+          status: "approved",
+          updatedAt: new Date(),
+        },
+      }
+    );
+
+    if (result.modifiedCount === 0) {
+      return res.status(400).json({
+        success: false,
+        message: "Campaign approval failed.",
+      });
+    }
+
+    res.status(200).json({
+      success: true,
+      message: "Campaign approved successfully.",
+    });
+  } catch (error) {
+    console.error("Approve campaign error:", error);
+
+    res.status(500).json({
+      success: false,
+      message: "Failed to approve campaign.",
+    });
+  }
+});
+
+
+// ==================== ADMIN - REJECT CAMPAIGN ====================
+
+app.put("/api/admin/campaigns/:id/reject", async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { reason } = req.body;
+
+    if (!ObjectId.isValid(id)) {
+      return res.status(400).json({
+        success: false,
+        message: "Invalid campaign ID.",
+      });
+    }
+
+    const campaign = await campaignCollection.findOne({
+      _id: new ObjectId(id),
+    });
+
+    if (!campaign) {
+      return res.status(404).json({
+        success: false,
+        message: "Campaign not found.",
+      });
+    }
+
+    if (campaign.status !== "pending") {
+      return res.status(400).json({
+        success: false,
+        message: "Only pending campaigns can be rejected.",
+      });
+    }
+
+    // Update campaign status
+    const updateResult = await campaignCollection.updateOne(
+      {
+        _id: new ObjectId(id),
+        status: "pending",
+      },
+      {
+        $set: {
+          status: "rejected",
+          updatedAt: new Date(),
+        },
+      }
+    );
+
+    if (updateResult.modifiedCount === 0) {
+      return res.status(400).json({
+        success: false,
+        message: "Campaign rejection failed.",
+      });
+    }
+
+    // Create notification for creator
+    const notificationsCollection =
+      db.collection("notifications");
+
+    await notificationsCollection.insertOne({
+      recipient_email: campaign.creator_email,
+      recipient_role: "Creator",
+      type: "campaign_rejected",
+      title: "Campaign Rejected",
+      message:
+        reason?.trim() ||
+        `Your campaign "${campaign.campaign_title}" was rejected by the admin.`,
+      campaign_id: campaign._id,
+      campaign_title: campaign.campaign_title,
+      read: false,
+      createdAt: new Date(),
+    });
+
+    res.status(200).json({
+      success: true,
+      message: "Campaign rejected and creator notified.",
+    });
+  } catch (error) {
+    console.error("Reject campaign error:", error);
+
+    res.status(500).json({
+      success: false,
+      message: "Failed to reject campaign.",
+    });
+  }
+});
     
 
     // Send a ping to confirm a successful connection
