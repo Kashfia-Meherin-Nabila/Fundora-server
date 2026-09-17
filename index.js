@@ -689,6 +689,11 @@ async function run() {
       }
     });
 
+    
+
+  
+
+
     app.get("/api/creator/pending-contributions/:email", async (req, res) => {
       try {
         const email = req.params.email.toLowerCase();
@@ -1167,57 +1172,66 @@ app.post("/api/withdrawals", async (req, res) => {
       }
     });
 
-    // ===============================
-    // PUBLIC EXPLORE CAMPAIGNS
-    // ===============================
-    app.get("/api/campaigns/explore", async (req, res) => {
-      try {
-        const now = new Date();
+     // ===============================
+// PUBLIC EXPLORE CAMPAIGNS
+// ===============================
+app.get("/api/campaigns/explore", async (req, res) => {
+  try {
+    // console.log(
+    //   "Authorization received:",
+    //   Boolean(req.headers.authorization)
+    // );
 
-        const campaigns = await campaignCollection
+    const now = new Date();
+
+    const campaigns = await campaignCollection
+      .find({
+        status: "approved",
+        deadline: { $gt: now },
+      })
+      .sort({ createdAt: -1 })
+      .toArray();
+
+    console.log("Approved, active campaigns:", campaigns.length);
+
+    const campaignsWithRaisedAmount = await Promise.all(
+      campaigns.map(async (campaign) => {
+        const contributions = await contributionCollection
           .find({
-            status: "approved",
-            deadline: { $gt: now },
+            campaign_id: campaign._id,
+            status: {
+              $in: ["pending", "approved"],
+            },
           })
-          .sort({ createdAt: -1 })
           .toArray();
 
-        // Calculate raised amount for every campaign
-        const campaignsWithRaisedAmount = await Promise.all(
-          campaigns.map(async (campaign) => {
-            const contributions = await contributionCollection
-              .find({
-                campaign_id: campaign._id,
-
-                // Count pending + approved
-                // Do not count rejected
-                status: {
-                  $in: ["pending", "approved"],
-                },
-              })
-              .toArray();
-
-            const raisedAmount = contributions.reduce((total, contribution) => {
-              return total + Number(contribution.Contribution_amount || 0);
-            }, 0);
-
-            return {
-              ...campaign,
-              raised_amount: raisedAmount,
-            };
-          }),
+        const raisedAmount = contributions.reduce(
+          (total, contribution) => {
+            return (
+              total +
+              Number(contribution.Contribution_amount || 0)
+            );
+          },
+          0
         );
 
-        res.status(200).json(campaignsWithRaisedAmount);
-      } catch (error) {
-        console.error("Explore campaigns error:", error);
+        return {
+          ...campaign,
+          raised_amount: raisedAmount,
+        };
+      })
+    );
 
-        res.status(500).json({
-          success: false,
-          message: "Failed to fetch campaigns.",
-        });
-      }
+    return res.status(200).json(campaignsWithRaisedAmount);
+  } catch (error) {
+    console.error("Explore campaigns error:", error);
+
+    return res.status(500).json({
+      success: false,
+      message: "Failed to fetch campaigns.",
     });
+  }
+});
 
     // ===============================
     // GET SINGLE CAMPAIGN BY ID
