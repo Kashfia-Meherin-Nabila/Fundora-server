@@ -1284,9 +1284,10 @@ async function run() {
     // SUPPORTER HOME DASHBOARD
     // ===============================
 
-    app.get("/api/supporter/dashboard/:email", async (req, res) => {
+    app.get("/api/supporter/dashboard/", verifyAuthToken,
+  requireRole("Supporter"), async (req, res) => {
       try {
-        const email = req.params.email.toLowerCase();
+         const email = req.user.email.toLowerCase();
 
         const contributionCollection = db.collection("contributions");
 
@@ -1395,7 +1396,8 @@ async function run() {
     // GET SINGLE CAMPAIGN BY ID
     // ===============================
 
-    app.get("/api/campaigns/:id", async (req, res) => {
+    app.get("/api/campaigns/:id",verifyAuthToken,
+  requireRole("Supporter"), async (req, res) => {
       try {
         const { id } = req.params;
 
@@ -1451,7 +1453,8 @@ async function run() {
     // ===============================
     // CREATE CONTRIBUTION
     // ===============================
-    app.post("/api/contributions", async (req, res) => {
+    app.post("/api/contributions",verifyAuthToken,
+  requireRole("Supporter"), async (req, res) => {
       try {
         const {
           campaign_id,
@@ -1667,9 +1670,10 @@ async function run() {
     // ===============================
     // SUPPORTER MY CONTRIBUTIONS
     // ===============================
-    app.get("/api/contributions/supporter/:email", async (req, res) => {
+    app.get("/api/contributions/supporter",  verifyAuthToken,
+  requireRole("Supporter"), async (req, res) => {
       try {
-        const email = req.params.email.toLowerCase();
+        const email = req.user.email.toLowerCase();
 
         const contributions = await contributionCollection
           .find({
