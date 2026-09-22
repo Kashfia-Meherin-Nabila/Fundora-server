@@ -14,6 +14,7 @@ app.use(express.json());
 
 const { MongoClient, ServerApiVersion, ObjectId } = require("mongodb");
 const Stripe = require("stripe");
+const { createRemoteJWKSet, jwtVerify } = require("jose-cjs");
 
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
 const uri = process.env.MONGODB_URI;
@@ -37,6 +38,114 @@ async function run() {
     const campaignCollection = db.collection("campaigns");
     const contributionCollection = db.collection("contributions");
     const reportsCollection = db.collection("reports");
+
+    const AUTH_URL = process.env.BETTER_AUTH_URL;
+
+    if (!AUTH_URL) {
+      throw new Error("BETTER_AUTH_URL is missing from .env");
+    }
+
+    const JWKS = createRemoteJWKSet(
+      new URL(`http://localhost:3000/api/auth/jwks`),
+    );
+
+    // Verify the Better Auth access token
+    async function verifyAuthToken(req, res, next) {
+      try {
+        const authorization = req.headers.authorization;
+
+        if (!authorization?.startsWith("Bearer ")) {
+          return res.status(401).json({
+            success: false,
+            message: "Authentication required.",
+          });
+        }
+
+        const token = authorization.slice(7).trim();
+
+        if (!token) {
+          return res.status(401).json({
+            success: false,
+            message: "Missing authentication token.",
+          });
+        }
+
+        const { payload } = await jwtVerify(token, JWKS);
+        console.log(payload);
+
+        if (!payload.id || !payload.email) {
+          return res.status(401).json({
+            success: false,
+            message: "Invalid token payload.",
+          });
+        }
+
+        const email = String(payload.email).trim().toLowerCase();
+
+        const dbUser = await userCollection.findOne(
+          { email },
+          {
+            projection: {
+              _id: 1,
+              email: 1,
+              name: 1,
+              role: 1,
+              isBlocked: 1,
+            },
+          },
+        );
+
+        if (!dbUser) {
+          return res.status(401).json({
+            success: false,
+            message: "User account not found.",
+          });
+        }
+
+        if (dbUser.isBlocked) {
+          return res.status(403).json({
+            success: false,
+            message: "Your account has been blocked.",
+          });
+        }
+
+        req.user = {
+          id: String(dbUser._id),
+          email: dbUser.email,
+          name: dbUser.name,
+          role: dbUser.role,
+        };
+
+        next();
+      } catch (error) {
+        // See your backend terminal for the real cause.
+        console.error("verifyAuthToken failed:", error);
+
+        return res.status(401).json({
+          success: false,
+          message: "Invalid or expired authentication token.",
+        });
+      }
+    }
+    function requireRole(...allowedRoles) {
+      return (req, res, next) => {
+        if (!req.user) {
+          return res.status(401).json({
+            success: false,
+            message: "Authentication required.",
+          });
+        }
+
+        if (!allowedRoles.includes(req.user.role)) {
+          return res.status(403).json({
+            success: false,
+            message: "You do not have permission to perform this action.",
+          });
+        }
+
+        next();
+      };
+    }
 
     // ===============================
     // STRIPE WEBHOOK
@@ -172,7 +281,7 @@ async function run() {
           const customerId = invoice.customer;
 
           if (!customerId) {
-           // console.error("❌ No Stripe customer ID.");
+            // console.error("❌ No Stripe customer ID.");
 
             return res.status(200).json({
               received: true,
@@ -182,7 +291,7 @@ async function run() {
           const customer = await stripe.customers.retrieve(customerId);
 
           if (customer.deleted) {
-           // console.error("❌ Stripe customer was deleted.");
+            // console.error("❌ Stripe customer was deleted.");
 
             return res.status(200).json({
               received: true,
@@ -246,7 +355,7 @@ async function run() {
           }
 
           if (supporter.role !== "Supporter") {
-           // console.error("❌ User is not a Supporter:", email);
+            // console.error("❌ User is not a Supporter:", email);
 
             return res.status(200).json({
               received: true,
@@ -299,7 +408,7 @@ async function run() {
           //console.log("💰 Credit update result:", creditUpdate);
 
           if (creditUpdate.modifiedCount !== 1) {
-           // console.error("❌ Failed to update credits.");
+            // console.error("❌ Failed to update credits.");
 
             return res.status(500).json({
               success: false,
@@ -388,8 +497,6 @@ async function run() {
       }
     });
 
-
-    
     // registration user
     app.post("/api/users/register", async (req, res) => {
       try {
@@ -495,204 +602,231 @@ async function run() {
     // Creator Dashboard Statistics
     // ===============================
 
-    app.get("/api/creator/stats/:email", async (req, res) => {
-      try {
-        const email = req.params.email.toLowerCase();
+    app.get(
+      "/api/creator/stats/:email",
+      verifyAuthToken,
+      requireRole("Creator"),
+      async (req, res) => {
+        try {
+          const email = req.params.email.toLowerCase();
 
-        const campaigns = await campaignCollection
-          .find({ creator_email: email })
-          .toArray();
+          const campaigns = await campaignCollection
+            .find({ creator_email: email })
+            .toArray();
 
-        const totalCampaigns = campaigns.length;
+          const totalCampaigns = campaigns.length;
 
-        const now = new Date();
+          const now = new Date();
 
-        const activeCampaigns = campaigns.filter((campaign) => {
-          return (
-            campaign.status === "approved" && new Date(campaign.deadline) > now
+          const activeCampaigns = campaigns.filter((campaign) => {
+            return (
+              campaign.status === "approved" &&
+              new Date(campaign.deadline) > now
+            );
+          }).length;
+
+          // Get approved contributions of this creator
+          const approvedContributions = await contributionCollection
+            .find({
+              creator_email: email,
+              status: "approved",
+            })
+            .toArray();
+
+          // Calculate total raised from Contribution_amount
+          const totalRaised = approvedContributions.reduce(
+            (total, contribution) => {
+              return total + Number(contribution.Contribution_amount || 0);
+            },
+            0,
           );
-        }).length;
 
-        // Get approved contributions of this creator
-        const approvedContributions = await contributionCollection
-          .find({
-            creator_email: email,
-            status: "approved",
-          })
-          .toArray();
+          res.status(200).json({
+            totalCampaigns,
+            activeCampaigns,
+            totalRaised,
+          });
+        } catch (error) {
+          console.error("Creator stats error:", error);
 
-        // Calculate total raised from Contribution_amount
-        const totalRaised = approvedContributions.reduce(
-          (total, contribution) => {
-            return total + Number(contribution.Contribution_amount || 0);
-          },
-          0,
-        );
+          res.status(500).json({
+            success: false,
+            message: "Failed to fetch creator statistics.",
+          });
+        }
+      },
+    );
 
-        res.status(200).json({
-          totalCampaigns,
-          activeCampaigns,
-          totalRaised,
-        });
-      } catch (error) {
-        console.error("Creator stats error:", error);
+    // Get logged-in creator's campaigns
+    app.get(
+      "/api/campaigns/creator",
+      verifyAuthToken,
+      requireRole("Creator"),
+      async (req, res) => {
+        try {
+          const campaigns = await campaignCollection
+            .find({ creator_email: req.user.email })
+            .sort({ deadline: -1 })
+            .toArray();
 
-        res.status(500).json({
-          success: false,
-          message: "Failed to fetch creator statistics.",
-        });
-      }
-    });
+          res.status(200).json({ success: true, campaigns });
+        } catch (error) {
+          console.error("Get creator campaigns error:", error);
+          res.status(500).json({ message: "Failed to fetch campaigns" });
+        }
+      },
+    );
 
     // ===============================
     // ADD NEW CAMPAIGN
     // ===============================
-    app.get("/api/campaigns/creator/:email", async (req, res) => {
-      try {
-        const email = req.params.email;
 
-        const campaigns = await campaignCollection
-          .find({ creator_email: email })
-          .sort({ deadline: -1 })
-          .toArray();
+    // app.get("/api/campaigns/creator/:email", async (req, res) => {
+    //   try {
+    //     const email = req.params.email;
 
-        res.status(200).send(campaigns);
-      } catch (error) {
-        console.error("Get creator campaigns error:", error);
+    //     const campaigns = await campaignCollection
+    //       .find({ creator_email: email })
+    //       .sort({ deadline: -1 })
+    //       .toArray();
 
-        res.status(500).send({
-          message: "Failed to fetch campaigns",
-          error: error.message,
-        });
-      }
-    });
+    //     res.status(200).send(campaigns);
+    //   } catch (error) {
+    //     console.error("Get creator campaigns error:", error);
 
-    app.post("/api/campaigns", async (req, res) => {
-      try {
-        const {
-          campaign_title,
-          campaign_story,
-          category,
-          funding_goal,
-          minimum_contribution,
-          deadline,
-          reward_info,
-          campaign_image_url,
+    //     res.status(500).send({
+    //       message: "Failed to fetch campaigns",
+    //       error: error.message,
+    //     });
+    //   }
+    // });
 
-          creator_email,
-          creator_name,
+    app.post(
+      "/api/campaigns",
+      verifyAuthToken,
+      requireRole("Creator"),
+      async (req, res) => {
+        try {
+          const {
+            campaign_title,
+            campaign_story,
+            category,
+            funding_goal,
+            minimum_contribution,
+            deadline,
+            reward_info,
+            campaign_image_url,
 
-          raised_amount,
-          status,
-        } = req.body;
+            creator_email,
+            creator_name,
 
-        // =========================
-        // Validation
-        // =========================
+            raised_amount,
+            status,
+          } = req.body;
 
-        if (
-          !campaign_title ||
-          !campaign_story ||
-          !category ||
-          !funding_goal ||
-          !minimum_contribution ||
-          !deadline ||
-          !reward_info ||
-          !campaign_image_url ||
-          !creator_email ||
-          !creator_name
-        ) {
-          return res.status(400).json({
-            success: false,
-            message: "All required fields are required.",
+          // =========================
+          // Validation
+          // =========================
+
+          if (
+            !campaign_title ||
+            !campaign_story ||
+            !category ||
+            !funding_goal ||
+            !minimum_contribution ||
+            !deadline ||
+            !reward_info ||
+            !campaign_image_url ||
+            !creator_email ||
+            !creator_name
+          ) {
+            return res.status(400).json({
+              success: false,
+              message: "All required fields are required.",
+            });
+          }
+
+          if (Number(minimum_contribution) > Number(funding_goal)) {
+            return res.status(400).json({
+              success: false,
+              message:
+                "Minimum contribution cannot be greater than funding goal.",
+            });
+          }
+
+          // =========================
+          // Check Creator
+          // =========================
+
+          const creator = await userCollection.findOne({
+            email: creator_email,
           });
-        }
 
-        if (Number(minimum_contribution) > Number(funding_goal)) {
-          return res.status(400).json({
-            success: false,
+          if (!creator) {
+            return res.status(404).json({
+              success: false,
+              message: "Creator not found.",
+            });
+          }
+
+          if (creator.role !== "Creator") {
+            return res.status(403).json({
+              success: false,
+              message: "Only creators can create campaigns.",
+            });
+          }
+
+          // =========================
+          // Create Campaign
+          // =========================
+
+          const campaign = {
+            campaign_title,
+            campaign_story,
+            category,
+
+            funding_goal: Number(funding_goal),
+
+            minimum_contribution: Number(minimum_contribution),
+
+            deadline: new Date(deadline),
+
+            reward_info,
+
+            campaign_image_url,
+
+            creator_email,
+            creator_name,
+
+            raised_amount: Number(raised_amount) || 0,
+
+            status: "pending",
+
+            createdAt: new Date(),
+            updatedAt: new Date(),
+          };
+
+          const result = await campaignCollection.insertOne(campaign);
+
+          res.status(201).json({
+            success: true,
+
             message:
-              "Minimum contribution cannot be greater than funding goal.",
+              "Campaign created successfully and is waiting for admin approval.",
+
+            campaignId: result.insertedId,
           });
-        }
+        } catch (error) {
+          console.error("Add campaign error:", error);
 
-        // =========================
-        // Check Creator
-        // =========================
-
-        const creator = await userCollection.findOne({
-          email: creator_email,
-        });
-
-        if (!creator) {
-          return res.status(404).json({
+          res.status(500).json({
             success: false,
-            message: "Creator not found.",
+            message: "Failed to create campaign.",
+            error: error.message,
           });
         }
-
-        if (creator.role !== "Creator") {
-          return res.status(403).json({
-            success: false,
-            message: "Only creators can create campaigns.",
-          });
-        }
-
-        // =========================
-        // Create Campaign
-        // =========================
-
-        const campaign = {
-          campaign_title,
-          campaign_story,
-          category,
-
-          funding_goal: Number(funding_goal),
-
-          minimum_contribution: Number(minimum_contribution),
-
-          deadline: new Date(deadline),
-
-          reward_info,
-
-          campaign_image_url,
-
-          creator_email,
-          creator_name,
-
-          raised_amount: Number(raised_amount) || 0,
-
-          status: "pending",
-
-          createdAt: new Date(),
-          updatedAt: new Date(),
-        };
-
-        const result = await campaignCollection.insertOne(campaign);
-
-        res.status(201).json({
-          success: true,
-
-          message:
-            "Campaign created successfully and is waiting for admin approval.",
-
-          campaignId: result.insertedId,
-        });
-      } catch (error) {
-        console.error("Add campaign error:", error);
-
-        res.status(500).json({
-          success: false,
-          message: "Failed to create campaign.",
-          error: error.message,
-        });
-      }
-    });
-
-    
-
-  
-
+      },
+    );
 
     app.get("/api/creator/pending-contributions/:email", async (req, res) => {
       try {
@@ -722,377 +856,407 @@ async function run() {
     // UPDATE CAMPAIGN
     // ===============================
 
-    app.put("/api/campaigns/:id", async (req, res) => {
-      try {
-        const { id } = req.params;
+    app.put(
+      "/api/campaigns/:id",
+      verifyAuthToken,
+      requireRole("Creator"),
+      async (req, res) => {
+        try {
+          const { id } = req.params;
 
-        const {
-          campaign_title,
-          campaign_story,
-          category,
-          funding_goal,
-          minimum_contribution,
-          deadline,
-          reward_info,
-          campaign_image_url,
-        } = req.body;
+          if (!ObjectId.isValid(id)) {
+            return res.status(400).json({
+              success: false,
+              message: "Invalid campaign ID.",
+            });
+          }
 
-        if (
-          !campaign_title ||
-          !campaign_story ||
-          !category ||
-          !funding_goal ||
-          !minimum_contribution ||
-          !deadline ||
-          !reward_info ||
-          !campaign_image_url
-        ) {
-          return res.status(400).json({
-            success: false,
-            message: "All required fields are required.",
-          });
-        }
+          const {
+            campaign_title,
+            campaign_story,
+            category,
+            funding_goal,
+            minimum_contribution,
+            deadline,
+            reward_info,
+            campaign_image_url,
+          } = req.body;
 
-        const result = await campaignCollection.updateOne(
-          {
+          if (
+            !campaign_title ||
+            !campaign_story ||
+            !category ||
+            !funding_goal ||
+            !minimum_contribution ||
+            !deadline ||
+            !reward_info ||
+            !campaign_image_url
+          ) {
+            return res.status(400).json({
+              success: false,
+              message: "All required fields are required.",
+            });
+          }
+
+          const campaign = await campaignCollection.findOne({
             _id: new ObjectId(id),
-          },
-          {
-            $set: {
-              campaign_title,
-              campaign_story,
-              category,
-              funding_goal: Number(funding_goal),
-              minimum_contribution: Number(minimum_contribution),
-              deadline: new Date(deadline),
-              reward_info,
-              campaign_image_url,
-              updatedAt: new Date(),
-            },
-          },
-        );
+          });
 
-        if (result.matchedCount === 0) {
-          return res.status(404).json({
+          if (!campaign) {
+            return res.status(404).json({
+              success: false,
+              message: "Campaign not found.",
+            });
+          }
+
+          if (campaign.creator_email !== req.user.email) {
+            return res.status(403).json({
+              success: false,
+              message: "You do not own this campaign.",
+            });
+          }
+
+          const result = await campaignCollection.updateOne(
+            { _id: new ObjectId(id) },
+            {
+              $set: {
+                campaign_title,
+                campaign_story,
+                category,
+                funding_goal: Number(funding_goal),
+                minimum_contribution: Number(minimum_contribution),
+                deadline: new Date(deadline),
+                reward_info,
+                campaign_image_url,
+                updatedAt: new Date(),
+              },
+            },
+          );
+
+          if (result.matchedCount === 0) {
+            return res.status(404).json({
+              success: false,
+              message: "Campaign not found.",
+            });
+          }
+
+          res.status(200).json({
+            success: true,
+            message: "Campaign updated successfully.",
+          });
+        } catch (error) {
+          console.error("Update campaign error:", error);
+          res.status(500).json({
             success: false,
-            message: "Campaign not found.",
+            message: "Failed to update campaign.",
+            error: error.message,
           });
         }
-
-        res.status(200).json({
-          success: true,
-          message: "Campaign updated successfully.",
-        });
-      } catch (error) {
-        console.error("Update campaign error:", error);
-
-        res.status(500).json({
-          success: false,
-          message: "Failed to update campaign.",
-          error: error.message,
-        });
-      }
-    });
-
+      },
+    );
     // ===============================
     // DELETE CAMPAIGN
     // ===============================
-    app.delete("/api/campaigns/:id", async (req, res) => {
+    app.delete(
+      "/api/campaigns/:id",
+      verifyAuthToken,
+      requireRole("Creator"),
+      async (req, res) => {
+        try {
+          const { id } = req.params;
+
+          if (!ObjectId.isValid(id)) {
+            return res.status(400).json({
+              success: false,
+              message: "Invalid campaign ID.",
+            });
+          }
+
+          const campaign = await campaignCollection.findOne({
+            _id: new ObjectId(id),
+          });
+
+          if (!campaign) {
+            return res.status(404).json({
+              success: false,
+              message: "Campaign not found.",
+            });
+          }
+
+          if (campaign.creator_email !== req.user.email) {
+            return res.status(403).json({
+              success: false,
+              message: "You do not own this campaign.",
+            });
+          }
+
+          const result = await campaignCollection.deleteOne({
+            _id: new ObjectId(id),
+          });
+
+          if (result.deletedCount === 0) {
+            return res.status(404).json({
+              success: false,
+              message: "Campaign not found.",
+            });
+          }
+
+          res.status(200).json({
+            success: true,
+            message: "Campaign deleted successfully.",
+          });
+        } catch (error) {
+          console.error("Delete campaign error:", error);
+          res.status(500).json({
+            success: false,
+            message: "Failed to delete campaign.",
+            error: error.message,
+          });
+        }
+      },
+    );
+
+    // get the raised-credit
+    app.get("/api/creator/raised-credits/:email", async (req, res) => {
       try {
-        const { id } = req.params;
+        const email = req.params.email.toLowerCase();
 
-        if (!ObjectId.isValid(id)) {
-          return res.status(400).json({
-            success: false,
-            message: "Invalid campaign ID.",
-          });
-        }
+        const result = await campaignCollection
+          .aggregate([
+            {
+              $match: {
+                creator_email: email,
+                status: "approved",
+              },
+            },
+            {
+              $group: {
+                _id: null,
+                totalRaisedCredits: {
+                  $sum: {
+                    $ifNull: ["$raised_amount", 0],
+                  },
+                },
+              },
+            },
+          ])
+          .toArray();
 
-        const result = await campaignCollection.deleteOne({
-          _id: new ObjectId(id),
-        });
-
-        if (result.deletedCount === 0) {
-          return res.status(404).json({
-            success: false,
-            message: "Campaign not found.",
-          });
-        }
+        const totalRaisedCredits = result[0]?.totalRaisedCredits || 0;
 
         res.status(200).json({
           success: true,
-          message: "Campaign deleted successfully.",
+          totalRaisedCredits,
         });
       } catch (error) {
-        console.error("Delete campaign error:", error);
+        console.error("Creator raised credits error:", error);
 
         res.status(500).json({
           success: false,
-          message: "Failed to delete campaign.",
-          error: error.message,
+          message: "Failed to fetch raised credits.",
         });
       }
     });
-
-    
-// get the raised-credit
-    app.get("/api/creator/raised-credits/:email", async (req, res) => {
-  try {
-    const email = req.params.email.toLowerCase();
-
-    const result = await campaignCollection
-      .aggregate([
-        {
-          $match: {
-            creator_email: email,
-            status: "approved",
-          },
-        },
-        {
-          $group: {
-            _id: null,
-            totalRaisedCredits: {
-              $sum: {
-                $ifNull: ["$raised_amount", 0],
-              },
-            },
-          },
-        },
-      ])
-      .toArray();
-
-    const totalRaisedCredits =
-      result[0]?.totalRaisedCredits || 0;
-
-    res.status(200).json({
-      success: true,
-      totalRaisedCredits,
-    });
-  } catch (error) {
-    console.error("Creator raised credits error:", error);
-
-    res.status(500).json({
-      success: false,
-      message: "Failed to fetch raised credits.",
-    });
-  }
-});
-
-    
-   // ===============================
-// CREATE WITHDRAWAL
-// ===============================
-app.post("/api/withdrawals", async (req, res) => {
-  try {
-    const {
-      creator_email,
-      creator_name,
-      withdrawal_credit,
-      payment_system,
-      account_number,
-      withdraw_date,
-    } = req.body;
-
-    if (
-      !creator_email ||
-      !creator_name ||
-      !withdrawal_credit ||
-      !payment_system ||
-      !account_number
-    ) {
-      return res.status(400).json({
-        success: false,
-        message: "All withdrawal fields are required.",
-      });
-    }
-
-    const email = creator_email.toLowerCase();
-    const credits = Number(withdrawal_credit);
-
-    // ===============================
-    // VALIDATION
-    // ===============================
-
-    if (!Number.isFinite(credits)) {
-      return res.status(400).json({
-        success: false,
-        message: "Invalid withdrawal credits.",
-      });
-    }
-
-    // Minimum 200 credits
-    if (credits < 200) {
-      return res.status(400).json({
-        success: false,
-        message: "Minimum withdrawal is 200 credits.",
-      });
-    }
-
-    // Must be multiple of 20
-    if (credits % 20 !== 0) {
-      return res.status(400).json({
-        success: false,
-        message: "Withdrawal credits must be a multiple of 20.",
-      });
-    }
-
-    // ===============================
-    // CHECK CREATOR
-    // ===============================
-
-    const creator = await userCollection.findOne({
-      email,
-    });
-
-    if (!creator) {
-      return res.status(404).json({
-        success: false,
-        message: "Creator not found.",
-      });
-    }
-
-    if (creator.role !== "Creator") {
-      return res.status(403).json({
-        success: false,
-        message: "Only creators can withdraw.",
-      });
-    }
-
-    // ===============================
-    // GET TOTAL RAISED CREDITS
-    // ===============================
-
-    const raisedResult = await campaignCollection
-      .aggregate([
-        {
-          $match: {
-            creator_email: email,
-            status: "approved",
-          },
-        },
-        {
-          $group: {
-            _id: null,
-            totalRaisedCredits: {
-              $sum: {
-                $ifNull: ["$raised_amount", 0],
-              },
-            },
-          },
-        },
-      ])
-      .toArray();
-
-    const totalRaisedCredits =
-      raisedResult[0]?.totalRaisedCredits || 0;
-
-    // ===============================
-    // GET ALREADY REQUESTED WITHDRAWALS
-    // ===============================
-
-    const withdrawalsCollection =
-      db.collection("withdrawals");
-
-    const previousWithdrawals =
-      await withdrawalsCollection
-        .find({
-          creator_email: email,
-          status: {
-            $in: ["pending", "approved"],
-          },
-        })
-        .toArray();
-
-    const alreadyWithdrawnCredits =
-      previousWithdrawals.reduce(
-        (total, withdrawal) => {
-          return (
-            total +
-            Number(withdrawal.withdrawal_credit || 0)
-          );
-        },
-        0
-      );
-
-    // ===============================
-    // CALCULATE AVAILABLE CREDITS
-    // ===============================
-
-    const availableCredits =
-      totalRaisedCredits - alreadyWithdrawnCredits;
-
-    // ===============================
-    // CHECK AVAILABLE BALANCE
-    // ===============================
-
-    if (credits > availableCredits) {
-      return res.status(400).json({
-        success: false,
-        message: `Insufficient raised credits. You have ${availableCredits} credits available for withdrawal.`,
-      });
-    }
-
-    // ===============================
-    // CALCULATE WITHDRAWAL AMOUNT
-    // ===============================
-
-    // 20 credits = $1
-    const amount = credits / 20;
 
     // ===============================
     // CREATE WITHDRAWAL
     // ===============================
+    app.post("/api/withdrawals", async (req, res) => {
+      try {
+        const {
+          creator_email,
+          creator_name,
+          withdrawal_credit,
+          payment_system,
+          account_number,
+          withdraw_date,
+        } = req.body;
 
-    const withdrawal = {
-      creator_email: email,
-      creator_name,
+        if (
+          !creator_email ||
+          !creator_name ||
+          !withdrawal_credit ||
+          !payment_system ||
+          !account_number
+        ) {
+          return res.status(400).json({
+            success: false,
+            message: "All withdrawal fields are required.",
+          });
+        }
 
-      withdrawal_credit: credits,
-      withdrawal_amount: amount,
+        const email = creator_email.toLowerCase();
+        const credits = Number(withdrawal_credit);
 
-      payment_system,
-      account_number,
+        // ===============================
+        // VALIDATION
+        // ===============================
 
-      withdraw_date: new Date(
-        withdraw_date || Date.now()
-      ),
+        if (!Number.isFinite(credits)) {
+          return res.status(400).json({
+            success: false,
+            message: "Invalid withdrawal credits.",
+          });
+        }
 
-      status: "pending",
+        // Minimum 200 credits
+        if (credits < 200) {
+          return res.status(400).json({
+            success: false,
+            message: "Minimum withdrawal is 200 credits.",
+          });
+        }
 
-      createdAt: new Date(),
-    };
+        // Must be multiple of 20
+        if (credits % 20 !== 0) {
+          return res.status(400).json({
+            success: false,
+            message: "Withdrawal credits must be a multiple of 20.",
+          });
+        }
 
-    const result =
-      await withdrawalsCollection.insertOne(
-        withdrawal
-      );
+        // ===============================
+        // CHECK CREATOR
+        // ===============================
 
-    res.status(201).json({
-      success: true,
-      message:
-        "Withdrawal request submitted successfully.",
-      withdrawalId: result.insertedId,
+        const creator = await userCollection.findOne({
+          email,
+        });
 
-      totalRaisedCredits,
-      alreadyWithdrawnCredits,
-      availableCredits:
-        availableCredits - credits,
+        if (!creator) {
+          return res.status(404).json({
+            success: false,
+            message: "Creator not found.",
+          });
+        }
 
-      withdrawal: {
-        credits,
-        amount,
-      },
+        if (creator.role !== "Creator") {
+          return res.status(403).json({
+            success: false,
+            message: "Only creators can withdraw.",
+          });
+        }
+
+        // ===============================
+        // GET TOTAL RAISED CREDITS
+        // ===============================
+
+        const raisedResult = await campaignCollection
+          .aggregate([
+            {
+              $match: {
+                creator_email: email,
+                status: "approved",
+              },
+            },
+            {
+              $group: {
+                _id: null,
+                totalRaisedCredits: {
+                  $sum: {
+                    $ifNull: ["$raised_amount", 0],
+                  },
+                },
+              },
+            },
+          ])
+          .toArray();
+
+        const totalRaisedCredits = raisedResult[0]?.totalRaisedCredits || 0;
+
+        // ===============================
+        // GET ALREADY REQUESTED WITHDRAWALS
+        // ===============================
+
+        const withdrawalsCollection = db.collection("withdrawals");
+
+        const previousWithdrawals = await withdrawalsCollection
+          .find({
+            creator_email: email,
+            status: {
+              $in: ["pending", "approved"],
+            },
+          })
+          .toArray();
+
+        const alreadyWithdrawnCredits = previousWithdrawals.reduce(
+          (total, withdrawal) => {
+            return total + Number(withdrawal.withdrawal_credit || 0);
+          },
+          0,
+        );
+
+        // ===============================
+        // CALCULATE AVAILABLE CREDITS
+        // ===============================
+
+        const availableCredits = totalRaisedCredits - alreadyWithdrawnCredits;
+
+        // ===============================
+        // CHECK AVAILABLE BALANCE
+        // ===============================
+
+        if (credits > availableCredits) {
+          return res.status(400).json({
+            success: false,
+            message: `Insufficient raised credits. You have ${availableCredits} credits available for withdrawal.`,
+          });
+        }
+
+        // ===============================
+        // CALCULATE WITHDRAWAL AMOUNT
+        // ===============================
+
+        // 20 credits = $1
+        const amount = credits / 20;
+
+        // ===============================
+        // CREATE WITHDRAWAL
+        // ===============================
+
+        const withdrawal = {
+          creator_email: email,
+          creator_name,
+
+          withdrawal_credit: credits,
+          withdrawal_amount: amount,
+
+          payment_system,
+          account_number,
+
+          withdraw_date: new Date(withdraw_date || Date.now()),
+
+          status: "pending",
+
+          createdAt: new Date(),
+        };
+
+        const result = await withdrawalsCollection.insertOne(withdrawal);
+
+        res.status(201).json({
+          success: true,
+          message: "Withdrawal request submitted successfully.",
+          withdrawalId: result.insertedId,
+
+          totalRaisedCredits,
+          alreadyWithdrawnCredits,
+          availableCredits: availableCredits - credits,
+
+          withdrawal: {
+            credits,
+            amount,
+          },
+        });
+      } catch (error) {
+        console.error("Withdrawal error:", error);
+
+        res.status(500).json({
+          success: false,
+          message: "Failed to create withdrawal.",
+          error: error.message,
+        });
+      }
     });
-  } catch (error) {
-    console.error("Withdrawal error:", error);
-
-    res.status(500).json({
-      success: false,
-      message: "Failed to create withdrawal.",
-      error: error.message,
-    });
-  }
-});
 
     // Get creator payment history
     app.get("/api/withdrawals/creator/:email", async (req, res) => {
@@ -1172,66 +1336,60 @@ app.post("/api/withdrawals", async (req, res) => {
       }
     });
 
-     // ===============================
-// PUBLIC EXPLORE CAMPAIGNS
-// ===============================
-app.get("/api/campaigns/explore", async (req, res) => {
-  try {
-    // console.log(
-    //   "Authorization received:",
-    //   Boolean(req.headers.authorization)
-    // );
+    // ===============================
+    // PUBLIC EXPLORE CAMPAIGNS
+    // ===============================
+    app.get("/api/campaigns/explore", async (req, res) => {
+      try {
+        // console.log(
+        //   "Authorization received:",
+        //   Boolean(req.headers.authorization)
+        // );
 
-    const now = new Date();
+        const now = new Date();
 
-    const campaigns = await campaignCollection
-      .find({
-        status: "approved",
-        deadline: { $gt: now },
-      })
-      .sort({ createdAt: -1 })
-      .toArray();
-
-    console.log("Approved, active campaigns:", campaigns.length);
-
-    const campaignsWithRaisedAmount = await Promise.all(
-      campaigns.map(async (campaign) => {
-        const contributions = await contributionCollection
+        const campaigns = await campaignCollection
           .find({
-            campaign_id: campaign._id,
-            status: {
-              $in: ["pending", "approved"],
-            },
+            status: "approved",
+            deadline: { $gt: now },
           })
+          .sort({ createdAt: -1 })
           .toArray();
 
-        const raisedAmount = contributions.reduce(
-          (total, contribution) => {
-            return (
-              total +
-              Number(contribution.Contribution_amount || 0)
-            );
-          },
-          0
+        console.log("Approved, active campaigns:", campaigns.length);
+
+        const campaignsWithRaisedAmount = await Promise.all(
+          campaigns.map(async (campaign) => {
+            const contributions = await contributionCollection
+              .find({
+                campaign_id: campaign._id,
+                status: {
+                  $in: ["pending", "approved"],
+                },
+              })
+              .toArray();
+
+            const raisedAmount = contributions.reduce((total, contribution) => {
+              return total + Number(contribution.Contribution_amount || 0);
+            }, 0);
+
+            return {
+              ...campaign,
+              raised_amount: raisedAmount,
+            };
+          }),
         );
 
-        return {
-          ...campaign,
-          raised_amount: raisedAmount,
-        };
-      })
-    );
+        return res.status(200).json(campaignsWithRaisedAmount);
+      } catch (error) {
+        console.error("Explore campaigns error:", error);
 
-    return res.status(200).json(campaignsWithRaisedAmount);
-  } catch (error) {
-    console.error("Explore campaigns error:", error);
-
-    return res.status(500).json({
-      success: false,
-      message: "Failed to fetch campaigns.",
+        return res.status(500).json({
+          success: false,
+          message: "Failed to fetch campaigns.",
+        });
+      }
     });
-  }
-});
 
     // ===============================
     // GET SINGLE CAMPAIGN BY ID
@@ -1400,13 +1558,6 @@ app.get("/api/campaigns/explore", async (req, res) => {
         // =========================
         const currentCredits = Number(supporter.credits || 0);
 
-        // console.log("=================================");
-        // console.log("Supporter:", supporter.email);
-        // console.log("Supporter ID:", supporter._id);
-        // console.log("Current credits:", currentCredits);
-        // console.log("Contribution amount:", amount);
-        // console.log("=================================");
-
         if (currentCredits < amount) {
           return res.status(400).json({
             success: false,
@@ -1543,769 +1694,747 @@ app.get("/api/campaigns/explore", async (req, res) => {
       }
     });
 
-// ===============================
-// ADMIN DASHBOARD STATS
-// ===============================
-
-app.get("/api/admin/stats", async (req, res) => {
-  try {
     // ===============================
-    // TOTAL SUPPORTERS
+    // ADMIN DASHBOARD STATS
     // ===============================
 
-    const totalSupporters =
-      await userCollection.countDocuments({
-        role: "Supporter",
-      });
+    app.get("/api/admin/stats", async (req, res) => {
+      try {
+        // ===============================
+        // TOTAL SUPPORTERS
+        // ===============================
 
-    // ===============================
-    // TOTAL CREATORS
-    // ===============================
+        const totalSupporters = await userCollection.countDocuments({
+          role: "Supporter",
+        });
 
-    const totalCreators =
-      await userCollection.countDocuments({
-        role: "Creator",
-      });
+        // ===============================
+        // TOTAL CREATORS
+        // ===============================
 
-    // ===============================
-    // TOTAL AVAILABLE CREDITS
-    // ===============================
+        const totalCreators = await userCollection.countDocuments({
+          role: "Creator",
+        });
 
-    const creditsResult =
-      await userCollection
-        .aggregate([
-          {
-            $group: {
-              _id: null,
+        // ===============================
+        // TOTAL AVAILABLE CREDITS
+        // ===============================
 
-              totalCredits: {
-                $sum: {
-                  $ifNull: ["$credits", 0],
+        const creditsResult = await userCollection
+          .aggregate([
+            {
+              $group: {
+                _id: null,
+
+                totalCredits: {
+                  $sum: {
+                    $ifNull: ["$credits", 0],
+                  },
                 },
               },
             },
+          ])
+          .toArray();
+
+        const totalAvailableCredits = creditsResult[0]?.totalCredits || 0;
+
+        // ===============================
+        // TOTAL PAYMENTS PROCESSED
+        // ===============================
+
+        const paymentsCollection = db.collection("payments");
+
+        const totalPaymentsProcessed = await paymentsCollection.countDocuments({
+          payment_status: "success",
+        });
+
+        // ===============================
+        // RESPONSE
+        // ===============================
+
+        res.status(200).json({
+          success: true,
+
+          stats: {
+            totalSupporters,
+            totalCreators,
+            totalAvailableCredits,
+            totalPaymentsProcessed,
           },
-        ])
-        .toArray();
+        });
+      } catch (error) {
+        console.error("Admin stats error:", error);
 
-    const totalAvailableCredits =
-      creditsResult[0]?.totalCredits || 0;
-
-    // ===============================
-    // TOTAL PAYMENTS PROCESSED
-    // ===============================
-
-    const paymentsCollection =
-      db.collection("payments");
-
-    const totalPaymentsProcessed =
-      await paymentsCollection.countDocuments({
-        payment_status: "success",
-      });
-
-    // ===============================
-    // RESPONSE
-    // ===============================
-
-    res.status(200).json({
-      success: true,
-
-      stats: {
-        totalSupporters,
-        totalCreators,
-        totalAvailableCredits,
-        totalPaymentsProcessed,
-      },
-    });
-  } catch (error) {
-    console.error(
-      "Admin stats error:",
-      error
-    );
-
-    res.status(500).json({
-      success: false,
-      message: "Failed to load admin statistics.",
-      error: error.message,
-    });
-  }
-});
-
-// =========================
-// ADMIN - GET ALL CAMPAIGNS
-// =========================
-app.get("/api/admin/campaigns", async (req, res) => {
-  try {
-    const campaigns = await campaignCollection
-      .find({})
-      .sort({ createdAt: -1 })
-      .toArray();
-
-    res.status(200).json({
-      success: true,
-      campaigns,
-    });
-  } catch (error) {
-    console.error("Admin campaigns error:", error);
-
-    res.status(500).json({
-      success: false,
-      message: "Failed to load campaigns.",
-      error: error.message,
-    });
-  }
-});
-
-// =========================
-// ADMIN - DELETE CAMPAIGN
-// =========================
-app.delete("/api/admin/campaigns/:id", async (req, res) => {
-  try {
-    const { id } = req.params;
-
-    if (!ObjectId.isValid(id)) {
-      return res.status(400).json({
-        success: false,
-        message: "Invalid campaign ID.",
-      });
-    }
-
-    const result = await campaignCollection.deleteOne({
-      _id: new ObjectId(id),
-    });
-
-    if (result.deletedCount === 0) {
-      return res.status(404).json({
-        success: false,
-        message: "Campaign not found.",
-      });
-    }
-
-    res.status(200).json({
-      success: true,
-      message: "Campaign deleted successfully.",
-    });
-  } catch (error) {
-    console.error("Admin delete campaign error:", error);
-
-    res.status(500).json({
-      success: false,
-      message: "Failed to delete campaign.",
-      error: error.message,
-    });
-  }
-});
-
-
-// ==================== ADMIN - PENDING CAMPAIGNS ====================
-
-app.get("/api/admin/campaigns/pending", async (req, res) => {
-  try {
-    const campaigns = await campaignCollection
-      .find({
-        status: "pending",
-      })
-      .sort({
-        createdAt: -1,
-      })
-      .toArray();
-
-    res.status(200).json({
-      success: true,
-      campaigns,
-    });
-  } catch (error) {
-    console.error("Pending campaigns error:", error);
-
-    res.status(500).json({
-      success: false,
-      message: "Failed to load pending campaigns.",
-    });
-  }
-});
-
-
-// ==================== ADMIN - APPROVE CAMPAIGN ====================
-
-app.put("/api/admin/campaigns/:id/approve", async (req, res) => {
-  try {
-    const { id } = req.params;
-
-    if (!ObjectId.isValid(id)) {
-      return res.status(400).json({
-        success: false,
-        message: "Invalid campaign ID.",
-      });
-    }
-
-    const campaign = await campaignCollection.findOne({
-      _id: new ObjectId(id),
-    });
-
-    if (!campaign) {
-      return res.status(404).json({
-        success: false,
-        message: "Campaign not found.",
-      });
-    }
-
-    if (campaign.status !== "pending") {
-      return res.status(400).json({
-        success: false,
-        message: "Only pending campaigns can be approved.",
-      });
-    }
-
-    const result = await campaignCollection.updateOne(
-      {
-        _id: new ObjectId(id),
-        status: "pending",
-      },
-      {
-        $set: {
-          status: "approved",
-          updatedAt: new Date(),
-        },
+        res.status(500).json({
+          success: false,
+          message: "Failed to load admin statistics.",
+          error: error.message,
+        });
       }
-    );
-
-    if (result.modifiedCount === 0) {
-      return res.status(400).json({
-        success: false,
-        message: "Campaign approval failed.",
-      });
-    }
-
-    res.status(200).json({
-      success: true,
-      message: "Campaign approved successfully.",
-    });
-  } catch (error) {
-    console.error("Approve campaign error:", error);
-
-    res.status(500).json({
-      success: false,
-      message: "Failed to approve campaign.",
-    });
-  }
-});
-
-
-// ==================== ADMIN - REJECT CAMPAIGN ====================
-
-app.put("/api/admin/campaigns/:id/reject", async (req, res) => {
-  try {
-    const { id } = req.params;
-    const { reason } = req.body;
-
-    if (!ObjectId.isValid(id)) {
-      return res.status(400).json({
-        success: false,
-        message: "Invalid campaign ID.",
-      });
-    }
-
-    const campaign = await campaignCollection.findOne({
-      _id: new ObjectId(id),
     });
 
-    if (!campaign) {
-      return res.status(404).json({
-        success: false,
-        message: "Campaign not found.",
-      });
-    }
+    // =========================
+    // ADMIN - GET ALL CAMPAIGNS
+    // =========================
+    app.get("/api/admin/campaigns", async (req, res) => {
+      try {
+        const campaigns = await campaignCollection
+          .find({})
+          .sort({ createdAt: -1 })
+          .toArray();
 
-    if (campaign.status !== "pending") {
-      return res.status(400).json({
-        success: false,
-        message: "Only pending campaigns can be rejected.",
-      });
-    }
+        res.status(200).json({
+          success: true,
+          campaigns,
+        });
+      } catch (error) {
+        console.error("Admin campaigns error:", error);
 
-    // Update campaign status
-    const updateResult = await campaignCollection.updateOne(
-      {
-        _id: new ObjectId(id),
-        status: "pending",
-      },
-      {
-        $set: {
-          status: "rejected",
-          updatedAt: new Date(),
-        },
+        res.status(500).json({
+          success: false,
+          message: "Failed to load campaigns.",
+          error: error.message,
+        });
       }
-    );
-
-    if (updateResult.modifiedCount === 0) {
-      return res.status(400).json({
-        success: false,
-        message: "Campaign rejection failed.",
-      });
-    }
-
-    // Create notification for creator
-    const notificationsCollection =
-      db.collection("notifications");
-
-    await notificationsCollection.insertOne({
-      recipient_email: campaign.creator_email,
-      recipient_role: "Creator",
-      type: "campaign_rejected",
-      title: "Campaign Rejected",
-      message:
-        reason?.trim() ||
-        `Your campaign "${campaign.campaign_title}" was rejected by the admin.`,
-      campaign_id: campaign._id,
-      campaign_title: campaign.campaign_title,
-      read: false,
-      createdAt: new Date(),
     });
 
-    res.status(200).json({
-      success: true,
-      message: "Campaign rejected and creator notified.",
-    });
-  } catch (error) {
-    console.error("Reject campaign error:", error);
+    // =========================
+    // ADMIN - DELETE CAMPAIGN
+    // =========================
+    app.delete("/api/admin/campaigns/:id", async (req, res) => {
+      try {
+        const { id } = req.params;
 
-    res.status(500).json({
-      success: false,
-      message: "Failed to reject campaign.",
-    });
-  }
-});
+        if (!ObjectId.isValid(id)) {
+          return res.status(400).json({
+            success: false,
+            message: "Invalid campaign ID.",
+          });
+        }
 
-// ==================== ADMIN - PENDING WITHDRAWALS ====================
-
-app.get("/api/admin/withdrawals/pending", async (req, res) => {
-  try {
-    const withdrawalsCollection = db.collection("withdrawals");
-
-    const withdrawals = await withdrawalsCollection
-      .find({
-        status: "pending",
-      })
-      .sort({
-        createdAt: -1,
-      })
-      .toArray();
-
-    res.status(200).json({
-      success: true,
-      withdrawals,
-    });
-  } catch (error) {
-    console.error("Pending withdrawals error:", error);
-
-    res.status(500).json({
-      success: false,
-      message: "Failed to load pending withdrawal requests.",
-    });
-  }
-});
-
-// ==================== ADMIN - APPROVE WITHDRAWAL ====================
-
-app.put("/api/admin/withdrawals/:id/approve", async (req, res) => {
-  try {
-    const { id } = req.params;
-
-    if (!ObjectId.isValid(id)) {
-      return res.status(400).json({
-        success: false,
-        message: "Invalid withdrawal ID.",
-      });
-    }
-
-    const withdrawalsCollection =
-      db.collection("withdrawals");
-
-    const withdrawal = await withdrawalsCollection.findOne({
-      _id: new ObjectId(id),
-    });
-
-    if (!withdrawal) {
-      return res.status(404).json({
-        success: false,
-        message: "Withdrawal request not found.",
-      });
-    }
-
-    if (withdrawal.status !== "pending") {
-      return res.status(400).json({
-        success: false,
-        message: "Only pending withdrawals can be approved.",
-      });
-    }
-
-    const amount = Number(
-      withdrawal.amount ||
-      withdrawal.withdrawal_amount ||
-      withdrawal.credits ||
-      0
-    );
-
-    if (amount <= 0) {
-      return res.status(400).json({
-        success: false,
-        message: "Invalid withdrawal amount.",
-      });
-    }
-
-    const creatorEmail =
-      withdrawal.creator_email ||
-      withdrawal.email;
-
-    if (!creatorEmail) {
-      return res.status(400).json({
-        success: false,
-        message: "Creator email is missing.",
-      });
-    }
-
-    // Find creator
-    const creator = await userCollection.findOne({
-      email: creatorEmail.toLowerCase(),
-      role: "Creator",
-    });
-
-    if (!creator) {
-      return res.status(404).json({
-        success: false,
-        message: "Creator not found.",
-      });
-    }
-
-    // Make sure creator has enough credits
-    if ((creator.credits || 0) < amount) {
-      return res.status(400).json({
-        success: false,
-        message:
-          "Creator does not have enough available credits.",
-      });
-    }
-
-    // Deduct creator credits
-    const creditResult = await userCollection.updateOne(
-      {
-        _id: creator._id,
-        credits: {
-          $gte: amount,
-        },
-      },
-      {
-        $inc: {
-          credits: -amount,
-        },
-      }
-    );
-
-    if (creditResult.modifiedCount === 0) {
-      return res.status(400).json({
-        success: false,
-        message:
-          "Failed to deduct creator credits.",
-      });
-    }
-
-    // Approve withdrawal
-    const withdrawalResult =
-      await withdrawalsCollection.updateOne(
-        {
+        const result = await campaignCollection.deleteOne({
           _id: new ObjectId(id),
-          status: "pending",
-        },
-        {
-          $set: {
-            status: "approved",
-            approvedAt: new Date(),
-          },
+        });
+
+        if (result.deletedCount === 0) {
+          return res.status(404).json({
+            success: false,
+            message: "Campaign not found.",
+          });
         }
-      );
 
-    if (withdrawalResult.modifiedCount === 0) {
-      // Refund credits if withdrawal update failed
-      await userCollection.updateOne(
-        {
-          _id: creator._id,
-        },
-        {
-          $inc: {
-            credits: amount,
-          },
+        res.status(200).json({
+          success: true,
+          message: "Campaign deleted successfully.",
+        });
+      } catch (error) {
+        console.error("Admin delete campaign error:", error);
+
+        res.status(500).json({
+          success: false,
+          message: "Failed to delete campaign.",
+          error: error.message,
+        });
+      }
+    });
+
+    // ==================== ADMIN - PENDING CAMPAIGNS ====================
+
+    app.get("/api/admin/campaigns/pending", async (req, res) => {
+      try {
+        const campaigns = await campaignCollection
+          .find({
+            status: "pending",
+          })
+          .sort({
+            createdAt: -1,
+          })
+          .toArray();
+
+        res.status(200).json({
+          success: true,
+          campaigns,
+        });
+      } catch (error) {
+        console.error("Pending campaigns error:", error);
+
+        res.status(500).json({
+          success: false,
+          message: "Failed to load pending campaigns.",
+        });
+      }
+    });
+
+    // ==================== ADMIN - APPROVE CAMPAIGN ====================
+
+    app.put("/api/admin/campaigns/:id/approve", async (req, res) => {
+      try {
+        const { id } = req.params;
+
+        if (!ObjectId.isValid(id)) {
+          return res.status(400).json({
+            success: false,
+            message: "Invalid campaign ID.",
+          });
         }
-      );
 
-      return res.status(400).json({
-        success: false,
-        message: "Failed to approve withdrawal.",
-      });
-    }
+        const campaign = await campaignCollection.findOne({
+          _id: new ObjectId(id),
+        });
 
-    res.status(200).json({
-      success: true,
-      message: "Withdrawal payment marked as successful.",
-    });
-  } catch (error) {
-    console.error("Approve withdrawal error:", error);
+        if (!campaign) {
+          return res.status(404).json({
+            success: false,
+            message: "Campaign not found.",
+          });
+        }
 
-    res.status(500).json({
-      success: false,
-      message: "Failed to process withdrawal.",
-    });
-  }
-});
+        if (campaign.status !== "pending") {
+          return res.status(400).json({
+            success: false,
+            message: "Only pending campaigns can be approved.",
+          });
+        }
 
-// ==================== ADMIN - GET ALL USERS ====================
+        const result = await campaignCollection.updateOne(
+          {
+            _id: new ObjectId(id),
+            status: "pending",
+          },
+          {
+            $set: {
+              status: "approved",
+              updatedAt: new Date(),
+            },
+          },
+        );
 
-app.get("/api/admin/users", async (req, res) => {
-  try {
-    const users = await userCollection
-      .find({})
-      .sort({
-        createdAt: -1,
-      })
-      .toArray();
+        if (result.modifiedCount === 0) {
+          return res.status(400).json({
+            success: false,
+            message: "Campaign approval failed.",
+          });
+        }
 
-    res.status(200).json({
-      success: true,
-      users,
-    });
-  } catch (error) {
-    console.error("Admin users error:", error);
+        res.status(200).json({
+          success: true,
+          message: "Campaign approved successfully.",
+        });
+      } catch (error) {
+        console.error("Approve campaign error:", error);
 
-    res.status(500).json({
-      success: false,
-      message: "Failed to load users.",
-    });
-  }
-});
-
-// ==================== ADMIN - DELETE USER ====================
-
-app.delete("/api/admin/users/:id", async (req, res) => {
-  try {
-    const { id } = req.params;
-
-    if (!ObjectId.isValid(id)) {
-      return res.status(400).json({
-        success: false,
-        message: "Invalid user ID.",
-      });
-    }
-
-    const user = await userCollection.findOne({
-      _id: new ObjectId(id),
-    });
-
-    if (!user) {
-      return res.status(404).json({
-        success: false,
-        message: "User not found.",
-      });
-    }
-
-    const result = await userCollection.deleteOne({
-      _id: new ObjectId(id),
-    });
-
-    if (result.deletedCount === 0) {
-      return res.status(400).json({
-        success: false,
-        message: "Failed to delete user.",
-      });
-    }
-
-    res.status(200).json({
-      success: true,
-      message: "User deleted successfully.",
-    });
-  } catch (error) {
-    console.error("Delete user error:", error);
-
-    res.status(500).json({
-      success: false,
-      message: "Failed to delete user.",
-    });
-  }
-});
-
-
-// =========================
-// ADMIN - GET ALL REPORTS
-// =========================
-app.get("/api/admin/reports", async (req, res) => {
-  try {
-    const reports = await reportsCollection
-      .find({})
-      .sort({ createdAt: -1 })
-      .toArray();
-
-    res.status(200).json({
-      success: true,
-      reports,
-    });
-  } catch (error) {
-    console.error("Admin reports error:", error);
-
-    res.status(500).json({
-      success: false,
-      message: "Failed to load reports.",
-      error: error.message,
-    });
-  }
-});
-
-// =========================
-// ADMIN - SUSPEND CAMPAIGN
-// =========================
-app.put("/api/admin/reports/:id/suspend", async (req, res) => {
-  try {
-    const { id } = req.params;
-
-    if (!ObjectId.isValid(id)) {
-      return res.status(400).json({
-        success: false,
-        message: "Invalid report ID.",
-      });
-    }
-
-    const report = await reportsCollection.findOne({
-      _id: new ObjectId(id),
-    });
-
-    if (!report) {
-      return res.status(404).json({
-        success: false,
-        message: "Report not found.",
-      });
-    }
-
-    if (!ObjectId.isValid(report.campaign_id)) {
-      return res.status(400).json({
-        success: false,
-        message: "Invalid campaign ID.",
-      });
-    }
-
-    const campaignResult = await campaignCollection.updateOne(
-      {
-        _id: new ObjectId(report.campaign_id),
-      },
-      {
-        $set: {
-          status: "suspended",
-          updatedAt: new Date(),
-        },
+        res.status(500).json({
+          success: false,
+          message: "Failed to approve campaign.",
+        });
       }
-    );
+    });
 
-    if (campaignResult.matchedCount === 0) {
-      return res.status(404).json({
-        success: false,
-        message: "Campaign not found.",
-      });
-    }
+    // ==================== ADMIN - REJECT CAMPAIGN ====================
 
-    await reportsCollection.updateOne(
-      {
-        _id: new ObjectId(id),
-      },
-      {
-        $set: {
-          status: "suspended",
-          handledAt: new Date(),
-        },
+    app.put("/api/admin/campaigns/:id/reject", async (req, res) => {
+      try {
+        const { id } = req.params;
+        const { reason } = req.body;
+
+        if (!ObjectId.isValid(id)) {
+          return res.status(400).json({
+            success: false,
+            message: "Invalid campaign ID.",
+          });
+        }
+
+        const campaign = await campaignCollection.findOne({
+          _id: new ObjectId(id),
+        });
+
+        if (!campaign) {
+          return res.status(404).json({
+            success: false,
+            message: "Campaign not found.",
+          });
+        }
+
+        if (campaign.status !== "pending") {
+          return res.status(400).json({
+            success: false,
+            message: "Only pending campaigns can be rejected.",
+          });
+        }
+
+        // Update campaign status
+        const updateResult = await campaignCollection.updateOne(
+          {
+            _id: new ObjectId(id),
+            status: "pending",
+          },
+          {
+            $set: {
+              status: "rejected",
+              updatedAt: new Date(),
+            },
+          },
+        );
+
+        if (updateResult.modifiedCount === 0) {
+          return res.status(400).json({
+            success: false,
+            message: "Campaign rejection failed.",
+          });
+        }
+
+        // Create notification for creator
+        const notificationsCollection = db.collection("notifications");
+
+        await notificationsCollection.insertOne({
+          recipient_email: campaign.creator_email,
+          recipient_role: "Creator",
+          type: "campaign_rejected",
+          title: "Campaign Rejected",
+          message:
+            reason?.trim() ||
+            `Your campaign "${campaign.campaign_title}" was rejected by the admin.`,
+          campaign_id: campaign._id,
+          campaign_title: campaign.campaign_title,
+          read: false,
+          createdAt: new Date(),
+        });
+
+        res.status(200).json({
+          success: true,
+          message: "Campaign rejected and creator notified.",
+        });
+      } catch (error) {
+        console.error("Reject campaign error:", error);
+
+        res.status(500).json({
+          success: false,
+          message: "Failed to reject campaign.",
+        });
       }
-    );
-
-    res.status(200).json({
-      success: true,
-      message: "Campaign suspended successfully.",
-    });
-  } catch (error) {
-    console.error("Suspend campaign error:", error);
-
-    res.status(500).json({
-      success: false,
-      message: "Failed to suspend campaign.",
-      error: error.message,
-    });
-  }
-});
-
-// =========================
-// ADMIN - DELETE REPORTED CAMPAIGN
-// =========================
-app.delete("/api/admin/reports/:id/campaign", async (req, res) => {
-  try {
-    const { id } = req.params;
-
-    if (!ObjectId.isValid(id)) {
-      return res.status(400).json({
-        success: false,
-        message: "Invalid report ID.",
-      });
-    }
-
-    const report = await reportsCollection.findOne({
-      _id: new ObjectId(id),
     });
 
-    if (!report) {
-      return res.status(404).json({
-        success: false,
-        message: "Report not found.",
-      });
-    }
+    // ==================== ADMIN - PENDING WITHDRAWALS ====================
 
-    if (!ObjectId.isValid(report.campaign_id)) {
-      return res.status(400).json({
-        success: false,
-        message: "Invalid campaign ID.",
-      });
-    }
+    app.get("/api/admin/withdrawals/pending", async (req, res) => {
+      try {
+        const withdrawalsCollection = db.collection("withdrawals");
 
-    const campaignResult = await campaignCollection.deleteOne({
-      _id: new ObjectId(report.campaign_id),
-    });
+        const withdrawals = await withdrawalsCollection
+          .find({
+            status: "pending",
+          })
+          .sort({
+            createdAt: -1,
+          })
+          .toArray();
 
-    if (campaignResult.deletedCount === 0) {
-      return res.status(404).json({
-        success: false,
-        message: "Campaign not found.",
-      });
-    }
+        res.status(200).json({
+          success: true,
+          withdrawals,
+        });
+      } catch (error) {
+        console.error("Pending withdrawals error:", error);
 
-    await reportsCollection.updateOne(
-      {
-        _id: new ObjectId(id),
-      },
-      {
-        $set: {
-          status: "deleted",
-          handledAt: new Date(),
-        },
+        res.status(500).json({
+          success: false,
+          message: "Failed to load pending withdrawal requests.",
+        });
       }
-    );
-
-    res.status(200).json({
-      success: true,
-      message: "Campaign deleted successfully.",
     });
-  } catch (error) {
-    console.error("Delete reported campaign error:", error);
 
-    res.status(500).json({
-      success: false,
-      message: "Failed to delete campaign.",
-      error: error.message,
+    // ==================== ADMIN - APPROVE WITHDRAWAL ====================
+
+    app.put("/api/admin/withdrawals/:id/approve", async (req, res) => {
+      try {
+        const { id } = req.params;
+
+        if (!ObjectId.isValid(id)) {
+          return res.status(400).json({
+            success: false,
+            message: "Invalid withdrawal ID.",
+          });
+        }
+
+        const withdrawalsCollection = db.collection("withdrawals");
+
+        const withdrawal = await withdrawalsCollection.findOne({
+          _id: new ObjectId(id),
+        });
+
+        if (!withdrawal) {
+          return res.status(404).json({
+            success: false,
+            message: "Withdrawal request not found.",
+          });
+        }
+
+        if (withdrawal.status !== "pending") {
+          return res.status(400).json({
+            success: false,
+            message: "Only pending withdrawals can be approved.",
+          });
+        }
+
+        const amount = Number(
+          withdrawal.amount ||
+            withdrawal.withdrawal_amount ||
+            withdrawal.credits ||
+            0,
+        );
+
+        if (amount <= 0) {
+          return res.status(400).json({
+            success: false,
+            message: "Invalid withdrawal amount.",
+          });
+        }
+
+        const creatorEmail = withdrawal.creator_email || withdrawal.email;
+
+        if (!creatorEmail) {
+          return res.status(400).json({
+            success: false,
+            message: "Creator email is missing.",
+          });
+        }
+
+        // Find creator
+        const creator = await userCollection.findOne({
+          email: creatorEmail.toLowerCase(),
+          role: "Creator",
+        });
+
+        if (!creator) {
+          return res.status(404).json({
+            success: false,
+            message: "Creator not found.",
+          });
+        }
+
+        // Make sure creator has enough credits
+        if ((creator.credits || 0) < amount) {
+          return res.status(400).json({
+            success: false,
+            message: "Creator does not have enough available credits.",
+          });
+        }
+
+        // Deduct creator credits
+        const creditResult = await userCollection.updateOne(
+          {
+            _id: creator._id,
+            credits: {
+              $gte: amount,
+            },
+          },
+          {
+            $inc: {
+              credits: -amount,
+            },
+          },
+        );
+
+        if (creditResult.modifiedCount === 0) {
+          return res.status(400).json({
+            success: false,
+            message: "Failed to deduct creator credits.",
+          });
+        }
+
+        // Approve withdrawal
+        const withdrawalResult = await withdrawalsCollection.updateOne(
+          {
+            _id: new ObjectId(id),
+            status: "pending",
+          },
+          {
+            $set: {
+              status: "approved",
+              approvedAt: new Date(),
+            },
+          },
+        );
+
+        if (withdrawalResult.modifiedCount === 0) {
+          // Refund credits if withdrawal update failed
+          await userCollection.updateOne(
+            {
+              _id: creator._id,
+            },
+            {
+              $inc: {
+                credits: amount,
+              },
+            },
+          );
+
+          return res.status(400).json({
+            success: false,
+            message: "Failed to approve withdrawal.",
+          });
+        }
+
+        res.status(200).json({
+          success: true,
+          message: "Withdrawal payment marked as successful.",
+        });
+      } catch (error) {
+        console.error("Approve withdrawal error:", error);
+
+        res.status(500).json({
+          success: false,
+          message: "Failed to process withdrawal.",
+        });
+      }
     });
-  }
-});
 
+    // ==================== ADMIN - GET ALL USERS ====================
 
+    app.get("/api/admin/users", async (req, res) => {
+      try {
+        const users = await userCollection
+          .find({})
+          .sort({
+            createdAt: -1,
+          })
+          .toArray();
+
+        res.status(200).json({
+          success: true,
+          users,
+        });
+      } catch (error) {
+        console.error("Admin users error:", error);
+
+        res.status(500).json({
+          success: false,
+          message: "Failed to load users.",
+        });
+      }
+    });
+
+    // ==================== ADMIN - DELETE USER ====================
+
+    app.delete("/api/admin/users/:id", async (req, res) => {
+      try {
+        const { id } = req.params;
+
+        if (!ObjectId.isValid(id)) {
+          return res.status(400).json({
+            success: false,
+            message: "Invalid user ID.",
+          });
+        }
+
+        const user = await userCollection.findOne({
+          _id: new ObjectId(id),
+        });
+
+        if (!user) {
+          return res.status(404).json({
+            success: false,
+            message: "User not found.",
+          });
+        }
+
+        const result = await userCollection.deleteOne({
+          _id: new ObjectId(id),
+        });
+
+        if (result.deletedCount === 0) {
+          return res.status(400).json({
+            success: false,
+            message: "Failed to delete user.",
+          });
+        }
+
+        res.status(200).json({
+          success: true,
+          message: "User deleted successfully.",
+        });
+      } catch (error) {
+        console.error("Delete user error:", error);
+
+        res.status(500).json({
+          success: false,
+          message: "Failed to delete user.",
+        });
+      }
+    });
+
+    // =========================
+    // ADMIN - GET ALL REPORTS
+    // =========================
+    app.get("/api/admin/reports", async (req, res) => {
+      try {
+        const reports = await reportsCollection
+          .find({})
+          .sort({ createdAt: -1 })
+          .toArray();
+
+        res.status(200).json({
+          success: true,
+          reports,
+        });
+      } catch (error) {
+        console.error("Admin reports error:", error);
+
+        res.status(500).json({
+          success: false,
+          message: "Failed to load reports.",
+          error: error.message,
+        });
+      }
+    });
+
+    // =========================
+    // ADMIN - SUSPEND CAMPAIGN
+    // =========================
+    app.put("/api/admin/reports/:id/suspend", async (req, res) => {
+      try {
+        const { id } = req.params;
+
+        if (!ObjectId.isValid(id)) {
+          return res.status(400).json({
+            success: false,
+            message: "Invalid report ID.",
+          });
+        }
+
+        const report = await reportsCollection.findOne({
+          _id: new ObjectId(id),
+        });
+
+        if (!report) {
+          return res.status(404).json({
+            success: false,
+            message: "Report not found.",
+          });
+        }
+
+        if (!ObjectId.isValid(report.campaign_id)) {
+          return res.status(400).json({
+            success: false,
+            message: "Invalid campaign ID.",
+          });
+        }
+
+        const campaignResult = await campaignCollection.updateOne(
+          {
+            _id: new ObjectId(report.campaign_id),
+          },
+          {
+            $set: {
+              status: "suspended",
+              updatedAt: new Date(),
+            },
+          },
+        );
+
+        if (campaignResult.matchedCount === 0) {
+          return res.status(404).json({
+            success: false,
+            message: "Campaign not found.",
+          });
+        }
+
+        await reportsCollection.updateOne(
+          {
+            _id: new ObjectId(id),
+          },
+          {
+            $set: {
+              status: "suspended",
+              handledAt: new Date(),
+            },
+          },
+        );
+
+        res.status(200).json({
+          success: true,
+          message: "Campaign suspended successfully.",
+        });
+      } catch (error) {
+        console.error("Suspend campaign error:", error);
+
+        res.status(500).json({
+          success: false,
+          message: "Failed to suspend campaign.",
+          error: error.message,
+        });
+      }
+    });
+
+    // =========================
+    // ADMIN - DELETE REPORTED CAMPAIGN
+    // =========================
+    app.delete("/api/admin/reports/:id/campaign", async (req, res) => {
+      try {
+        const { id } = req.params;
+
+        if (!ObjectId.isValid(id)) {
+          return res.status(400).json({
+            success: false,
+            message: "Invalid report ID.",
+          });
+        }
+
+        const report = await reportsCollection.findOne({
+          _id: new ObjectId(id),
+        });
+
+        if (!report) {
+          return res.status(404).json({
+            success: false,
+            message: "Report not found.",
+          });
+        }
+
+        if (!ObjectId.isValid(report.campaign_id)) {
+          return res.status(400).json({
+            success: false,
+            message: "Invalid campaign ID.",
+          });
+        }
+
+        const campaignResult = await campaignCollection.deleteOne({
+          _id: new ObjectId(report.campaign_id),
+        });
+
+        if (campaignResult.deletedCount === 0) {
+          return res.status(404).json({
+            success: false,
+            message: "Campaign not found.",
+          });
+        }
+
+        await reportsCollection.updateOne(
+          {
+            _id: new ObjectId(id),
+          },
+          {
+            $set: {
+              status: "deleted",
+              handledAt: new Date(),
+            },
+          },
+        );
+
+        res.status(200).json({
+          success: true,
+          message: "Campaign deleted successfully.",
+        });
+      } catch (error) {
+        console.error("Delete reported campaign error:", error);
+
+        res.status(500).json({
+          success: false,
+          message: "Failed to delete campaign.",
+          error: error.message,
+        });
+      }
+    });
 
     // Send a ping to confirm a successful connection
     await client.db("admin").command({ ping: 1 });
