@@ -656,8 +656,7 @@ async function run() {
     );
 
     
-    app.post(
-      "/api/campaigns",
+    app.post("/api/campaigns",
       verifyAuthToken,
       requireRole("Creator"),
       async (req, res) => {
@@ -806,6 +805,40 @@ async function run() {
         });
       }
     });
+
+
+    // ===============================
+// PUBLIC TOP FUNDED CAMPAIGNS
+// ===============================
+app.get("/api/campaigns/top-funded", async (req, res) => {
+  try {
+    const limit = Math.min(Number(req.query.limit) || 6, 20);
+
+    const campaigns = await campaignCollection
+      .find({ status: "approved" })
+      .sort({ raised_amount: -1 })
+      .limit(limit)
+      .toArray();
+
+    res.status(200).json({
+      success: true,
+      campaigns,
+    });
+  } catch (error) {
+    console.error("Top funded campaigns error:", error);
+    res.status(500).json({
+      success: false,
+      message: "Failed to fetch top funded campaigns.",
+    });
+  }
+});
+
+// ===============================
+// GET SINGLE CAMPAIGN BY ID
+// ===============================
+// app.get("/api/campaigns/:id", async (req, res) => {
+//   // ...unchanged
+// });
 
     // ===============================
     // UPDATE CAMPAIGN
