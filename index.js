@@ -298,9 +298,9 @@ async function run() {
             });
           }
 
-          // ==========================================
+     
           // GET SUBSCRIPTION
-          // ==========================================
+       
 
           let subscription = null;
 
@@ -316,9 +316,8 @@ async function run() {
             }
           }
 
-          // ==========================================
           // GET SUPPORTER EMAIL
-          // ==========================================
+         
 
           const metadataEmail = subscription?.metadata?.supporter_email;
 
@@ -337,9 +336,9 @@ async function run() {
             });
           }
 
-          // ==========================================
+     
           // FIND SUPPORTER
-          // ==========================================
+          
 
           const supporter = await userCollection.findOne({
             email,
@@ -367,9 +366,9 @@ async function run() {
 
           //console.log("💳 Current credits:", supporter.credits);
 
-          // ==========================================
+       
           // DUPLICATE PAYMENT PROTECTION
-          // ==========================================
+      
 
           const paymentsCollection = db.collection("payments");
 
@@ -386,9 +385,9 @@ async function run() {
             });
           }
 
-          // ==========================================
+         
           // ADD CREDITS
-          // ==========================================
+       
 
           const creditUpdate = await userCollection.updateOne(
             {
@@ -416,17 +415,17 @@ async function run() {
             });
           }
 
-          // ==========================================
+        
           // GET UPDATED SUPPORTER
-          // ==========================================
+      
 
           const updatedSupporter = await userCollection.findOne({
             _id: supporter._id,
           });
 
-          // ==========================================
+   
           // SAVE PAYMENT
-          // ==========================================
+         
 
           await paymentsCollection.insertOne({
             stripe_invoice_id: invoice.id,
@@ -461,27 +460,6 @@ async function run() {
             createdAt: new Date(),
           });
 
-          // ==========================================
-          // SUCCESS LOG
-          // ==========================================
-
-          // console.log("=================================");
-
-          // console.log("✅ PAYMENT SUCCESS");
-
-          // console.log("=================================");
-
-          // console.log("User:", supporter.email);
-
-          // console.log("Package:", selectedPackage.package_name);
-
-          // console.log("Credits added:", selectedPackage.credits);
-
-          // console.log("Previous credits:", supporter.credits);
-
-          // console.log("New credits:", updatedSupporter.credits);
-
-          // console.log("=================================");
         }
 
         return res.status(200).json({
@@ -677,30 +655,7 @@ async function run() {
       },
     );
 
-    // ===============================
-    // ADD NEW CAMPAIGN
-    // ===============================
-
-    // app.get("/api/campaigns/creator/:email", async (req, res) => {
-    //   try {
-    //     const email = req.params.email;
-
-    //     const campaigns = await campaignCollection
-    //       .find({ creator_email: email })
-    //       .sort({ deadline: -1 })
-    //       .toArray();
-
-    //     res.status(200).send(campaigns);
-    //   } catch (error) {
-    //     console.error("Get creator campaigns error:", error);
-
-    //     res.status(500).send({
-    //       message: "Failed to fetch campaigns",
-    //       error: error.message,
-    //     });
-    //   }
-    // });
-
+    
     app.post(
       "/api/campaigns",
       verifyAuthToken,
@@ -1396,8 +1351,7 @@ async function run() {
     // GET SINGLE CAMPAIGN BY ID
     // ===============================
 
-    app.get("/api/campaigns/:id",verifyAuthToken,
-  requireRole("Supporter"), async (req, res) => {
+    app.get("/api/campaigns/:id", async (req, res) => {
       try {
         const { id } = req.params;
 
@@ -1449,6 +1403,66 @@ async function run() {
         });
       }
     });
+// Report campaign
+    app.post(
+  "/api/reports",
+  verifyAuthToken,
+  requireRole("Supporter"),
+  async (req, res) => {
+    try {
+      const { campaign_id, campaign_title, reason } = req.body;
+
+      if (!campaign_id || !campaign_title || !reason || !reason.trim()) {
+        return res.status(400).json({
+          success: false,
+          message: "Campaign ID, title, and reason are required.",
+        });
+      }
+
+      if (!ObjectId.isValid(campaign_id)) {
+        return res.status(400).json({
+          success: false,
+          message: "Invalid campaign ID.",
+        });
+      }
+
+      const campaign = await campaignCollection.findOne({
+        _id: new ObjectId(campaign_id),
+      });
+
+      if (!campaign) {
+        return res.status(404).json({
+          success: false,
+          message: "Campaign not found.",
+        });
+      }
+
+      const report = {
+        campaign_id: campaign._id,
+        campaign_title: campaign.campaign_title,
+        reporter_name: req.user.name,
+        reporter_email: req.user.email,
+        reason: reason.trim(),
+        status: "pending",
+        createdAt: new Date(),
+      };
+
+      const result = await reportsCollection.insertOne(report);
+
+      res.status(201).json({
+        success: true,
+        message: "Report submitted successfully.",
+        reportId: result.insertedId,
+      });
+    } catch (error) {
+      console.error("Create report error:", error);
+      res.status(500).json({
+        success: false,
+        message: "Failed to submit report.",
+      });
+    }
+  }
+);
 
     // ===============================
     // CREATE CONTRIBUTION
@@ -1702,28 +1716,20 @@ async function run() {
     // ADMIN DASHBOARD STATS
     // ===============================
 
-    app.get("/api/admin/stats", async (req, res) => {
+    app.get("/api/admin/stats",verifyAuthToken,
+  requireRole("Admin"), async (req, res) => {
       try {
-        // ===============================
-        // TOTAL SUPPORTERS
-        // ===============================
-
+        
         const totalSupporters = await userCollection.countDocuments({
           role: "Supporter",
         });
-
-        // ===============================
-        // TOTAL CREATORS
-        // ===============================
 
         const totalCreators = await userCollection.countDocuments({
           role: "Creator",
         });
 
-        // ===============================
         // TOTAL AVAILABLE CREDITS
-        // ===============================
-
+      
         const creditsResult = await userCollection
           .aggregate([
             {
@@ -1741,21 +1747,18 @@ async function run() {
           .toArray();
 
         const totalAvailableCredits = creditsResult[0]?.totalCredits || 0;
-
-        // ===============================
+       
         // TOTAL PAYMENTS PROCESSED
-        // ===============================
-
+       
         const paymentsCollection = db.collection("payments");
 
         const totalPaymentsProcessed = await paymentsCollection.countDocuments({
           payment_status: "success",
         });
 
-        // ===============================
+       
         // RESPONSE
-        // ===============================
-
+       
         res.status(200).json({
           success: true,
 
@@ -1780,7 +1783,8 @@ async function run() {
     // =========================
     // ADMIN - GET ALL CAMPAIGNS
     // =========================
-    app.get("/api/admin/campaigns", async (req, res) => {
+    app.get("/api/admin/campaigns",verifyAuthToken,
+  requireRole("Admin"), async (req, res) => {
       try {
         const campaigns = await campaignCollection
           .find({})
@@ -1805,7 +1809,8 @@ async function run() {
     // =========================
     // ADMIN - DELETE CAMPAIGN
     // =========================
-    app.delete("/api/admin/campaigns/:id", async (req, res) => {
+    app.delete("/api/admin/campaigns/:id",verifyAuthToken,
+  requireRole("Admin"), async (req, res) => {
       try {
         const { id } = req.params;
 
@@ -1844,7 +1849,8 @@ async function run() {
 
     // ==================== ADMIN - PENDING CAMPAIGNS ====================
 
-    app.get("/api/admin/campaigns/pending", async (req, res) => {
+    app.get("/api/admin/campaigns/pending",verifyAuthToken,
+  requireRole("Admin"), async (req, res) => {
       try {
         const campaigns = await campaignCollection
           .find({
@@ -1871,7 +1877,8 @@ async function run() {
 
     // ==================== ADMIN - APPROVE CAMPAIGN ====================
 
-    app.put("/api/admin/campaigns/:id/approve", async (req, res) => {
+    app.put("/api/admin/campaigns/:id/approve",verifyAuthToken,
+  requireRole("Admin"), async (req, res) => {
       try {
         const { id } = req.params;
 
@@ -1936,7 +1943,8 @@ async function run() {
 
     // ==================== ADMIN - REJECT CAMPAIGN ====================
 
-    app.put("/api/admin/campaigns/:id/reject", async (req, res) => {
+    app.put("/api/admin/campaigns/:id/reject",verifyAuthToken,
+  requireRole("Admin"), async (req, res) => {
       try {
         const { id } = req.params;
         const { reason } = req.body;
@@ -2020,7 +2028,8 @@ async function run() {
 
     // ==================== ADMIN - PENDING WITHDRAWALS ====================
 
-    app.get("/api/admin/withdrawals/pending", async (req, res) => {
+    app.get("/api/admin/withdrawals/pending",verifyAuthToken,
+  requireRole("Admin"), async (req, res) => {
       try {
         const withdrawalsCollection = db.collection("withdrawals");
 
@@ -2049,7 +2058,8 @@ async function run() {
 
     // ==================== ADMIN - APPROVE WITHDRAWAL ====================
 
-    app.put("/api/admin/withdrawals/:id/approve", async (req, res) => {
+    app.put("/api/admin/withdrawals/:id/approve",verifyAuthToken,
+  requireRole("Admin"), async (req, res) => {
       try {
         const { id } = req.params;
 
@@ -2195,7 +2205,8 @@ async function run() {
 
     // ==================== ADMIN - GET ALL USERS ====================
 
-    app.get("/api/admin/users", async (req, res) => {
+    app.get("/api/admin/users",verifyAuthToken,
+  requireRole("Admin"), async (req, res) => {
       try {
         const users = await userCollection
           .find({})
@@ -2218,9 +2229,78 @@ async function run() {
       }
     });
 
+    // Edit User
+    app.put(
+  "/api/admin/users/:id/role",
+  verifyAuthToken,
+  requireRole("Admin"),
+  async (req, res) => {
+    try {
+      const { id } = req.params;
+      const { role } = req.body;
+
+      if (!ObjectId.isValid(id)) {
+        return res.status(400).json({
+          success: false,
+          message: "Invalid user ID.",
+        });
+      }
+
+      const allowedRoles = ["Admin", "Creator", "Supporter"];
+
+      if (!allowedRoles.includes(role)) {
+        return res.status(400).json({
+          success: false,
+          message: "Invalid role.",
+        });
+      }
+
+      const user = await userCollection.findOne({ _id: new ObjectId(id) });
+
+      if (!user) {
+        return res.status(404).json({
+          success: false,
+          message: "User not found.",
+        });
+      }
+
+      if (user.email === req.user.email) {
+        return res.status(400).json({
+          success: false,
+          message: "You cannot change your own role.",
+        });
+      }
+
+      const result = await userCollection.updateOne(
+        { _id: new ObjectId(id) },
+        { $set: { role, updatedAt: new Date() } }
+      );
+
+      if (result.modifiedCount === 0) {
+        return res.status(400).json({
+          success: false,
+          message: "Failed to update role.",
+        });
+      }
+
+      res.status(200).json({
+        success: true,
+        message: "User role updated successfully.",
+      });
+    } catch (error) {
+      console.error("Role update error:", error);
+      res.status(500).json({
+        success: false,
+        message: "Failed to update user role.",
+      });
+    }
+  }
+);
+
     // ==================== ADMIN - DELETE USER ====================
 
-    app.delete("/api/admin/users/:id", async (req, res) => {
+    app.delete("/api/admin/users/:id",verifyAuthToken,
+  requireRole("Admin"), async (req, res) => {
       try {
         const { id } = req.params;
 
@@ -2270,7 +2350,8 @@ async function run() {
     // =========================
     // ADMIN - GET ALL REPORTS
     // =========================
-    app.get("/api/admin/reports", async (req, res) => {
+    app.get("/api/admin/reports",verifyAuthToken,
+  requireRole("Admin"), async (req, res) => {
       try {
         const reports = await reportsCollection
           .find({})
@@ -2295,7 +2376,8 @@ async function run() {
     // =========================
     // ADMIN - SUSPEND CAMPAIGN
     // =========================
-    app.put("/api/admin/reports/:id/suspend", async (req, res) => {
+    app.put("/api/admin/reports/:id/suspend",verifyAuthToken,
+  requireRole("Admin"), async (req, res) => {
       try {
         const { id } = req.params;
 
@@ -2373,7 +2455,8 @@ async function run() {
     // =========================
     // ADMIN - DELETE REPORTED CAMPAIGN
     // =========================
-    app.delete("/api/admin/reports/:id/campaign", async (req, res) => {
+    app.delete("/api/admin/reports/:id/campaign",verifyAuthToken,
+  requireRole("Admin"), async (req, res) => {
       try {
         const { id } = req.params;
 
