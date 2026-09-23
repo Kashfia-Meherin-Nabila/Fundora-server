@@ -31,7 +31,7 @@ const client = new MongoClient(uri, {
 async function run() {
   try {
     // Connect the client to the server	(optional starting in v4.7)
-    await client.connect();
+    // await client.connect();
 
     const db = client.db(process.env.AUTH_DB_NAME);
     const userCollection = db.collection("user");
@@ -46,7 +46,7 @@ async function run() {
     }
 
     const JWKS = createRemoteJWKSet(
-      new URL(`http://localhost:3000/api/auth/jwks`),
+      new URL(`${process.env.BETTER_AUTH_URL}/api/auth/jwks`),
     );
 
     // Verify the Better Auth access token
@@ -2418,7 +2418,7 @@ async function run() {
     });
 
     // Send a ping to confirm a successful connection
-    await client.db("admin").command({ ping: 1 });
+    // await client.db("admin").command({ ping: 1 });
     console.log(
       "Pinged your deployment. You successfully connected to MongoDB!",
     );
@@ -2430,7 +2430,7 @@ async function run() {
 run().catch(console.dir);
 
 app.get("/", (req, res) => {
-  res.send("Hello World!");
+  res.send("Welcome to Fundora Backend!");
 });
 
 app.listen(port, () => {
