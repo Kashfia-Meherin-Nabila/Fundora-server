@@ -581,12 +581,12 @@ async function run() {
     // ===============================
 
     app.get(
-      "/api/creator/stats/:email",
+      "/api/creator/stats",
       verifyAuthToken,
       requireRole("Creator"),
       async (req, res) => {
         try {
-          const email = req.params.email.toLowerCase();
+          const email = req.user.email.toLowerCase();
 
           const campaigns = await campaignCollection
             .find({ creator_email: email })
@@ -783,10 +783,10 @@ async function run() {
       },
     );
 
-    app.get("/api/creator/pending-contributions/:email", async (req, res) => {
+    app.get("/api/creator/pending-contributions",verifyAuthToken,
+     requireRole("Creator"), async (req, res) => {
       try {
-        const email = req.params.email.toLowerCase();
-
+        const email = req.user.email.toLowerCase();
         const contributions = await db
           .collection("contributions")
           .find({
@@ -972,268 +972,161 @@ async function run() {
     );
 
     // get the raised-credit
-    app.get("/api/creator/raised-credits/:email", async (req, res) => {
-      try {
-        const email = req.params.email.toLowerCase();
+  app.get(
+  "/api/creator/raised-credits",
+  verifyAuthToken,
+  requireRole("Creator"),
+  async (req, res) => {
+    try {
+      const email = req.user.email.toLowerCase();
 
-        const result = await campaignCollection
-          .aggregate([
-            {
-              $match: {
-                creator_email: email,
-                status: "approved",
-              },
+      const result = await campaignCollection
+        .aggregate([
+          { $match: { creator_email: email, status: "approved" } },
+          {
+            $group: {
+              _id: null,
+              totalRaisedCredits: { $sum: { $ifNull: ["$raised_amount", 0] } },
             },
-            {
-              $group: {
-                _id: null,
-                totalRaisedCredits: {
-                  $sum: {
-                    $ifNull: ["$raised_amount", 0],
-                  },
-                },
-              },
-            },
-          ])
-          .toArray();
+          },
+        ])
+        .toArray();
 
-        const totalRaisedCredits = result[0]?.totalRaisedCredits || 0;
+      const totalRaisedCredits = result[0]?.totalRaisedCredits || 0;
 
-        res.status(200).json({
-          success: true,
-          totalRaisedCredits,
-        });
-      } catch (error) {
-        console.error("Creator raised credits error:", error);
-
-        res.status(500).json({
-          success: false,
-          message: "Failed to fetch raised credits.",
-        });
-      }
-    });
-
+      res.status(200).json({ success: true, totalRaisedCredits });
+    } catch (error) {
+      console.error("Creator raised credits error:", error);
+      res.status(500).json({ success: false, message: "Failed to fetch raised credits." });
+    }
+  }
+);
     // ===============================
     // CREATE WITHDRAWAL
     // ===============================
-    app.post("/api/withdrawals", async (req, res) => {
-      try {
-        const {
-          creator_email,
-          creator_name,
-          withdrawal_credit,
-          payment_system,
-          account_number,
-          withdraw_date,
-        } = req.body;
+   app.post(
+  "/api/withdrawals",
+  verifyAuthToken,
+  requireRole("Creator"),
+  async (req, res) => {
+    try {
+      const { withdrawal_credit, payment_system, account_number, withdraw_date } = req.body;
 
-        if (
-          !creator_email ||
-          !creator_name ||
-          !withdrawal_credit ||
-          !payment_system ||
-          !account_number
-        ) {
-          return res.status(400).json({
-            success: false,
-            message: "All withdrawal fields are required.",
-          });
-        }
-
-        const email = creator_email.toLowerCase();
-        const credits = Number(withdrawal_credit);
-
-        // ===============================
-        // VALIDATION
-        // ===============================
-
-        if (!Number.isFinite(credits)) {
-          return res.status(400).json({
-            success: false,
-            message: "Invalid withdrawal credits.",
-          });
-        }
-
-        // Minimum 200 credits
-        if (credits < 200) {
-          return res.status(400).json({
-            success: false,
-            message: "Minimum withdrawal is 200 credits.",
-          });
-        }
-
-        // Must be multiple of 20
-        if (credits % 20 !== 0) {
-          return res.status(400).json({
-            success: false,
-            message: "Withdrawal credits must be a multiple of 20.",
-          });
-        }
-
-        // ===============================
-        // CHECK CREATOR
-        // ===============================
-
-        const creator = await userCollection.findOne({
-          email,
-        });
-
-        if (!creator) {
-          return res.status(404).json({
-            success: false,
-            message: "Creator not found.",
-          });
-        }
-
-        if (creator.role !== "Creator") {
-          return res.status(403).json({
-            success: false,
-            message: "Only creators can withdraw.",
-          });
-        }
-
-        // ===============================
-        // GET TOTAL RAISED CREDITS
-        // ===============================
-
-        const raisedResult = await campaignCollection
-          .aggregate([
-            {
-              $match: {
-                creator_email: email,
-                status: "approved",
-              },
-            },
-            {
-              $group: {
-                _id: null,
-                totalRaisedCredits: {
-                  $sum: {
-                    $ifNull: ["$raised_amount", 0],
-                  },
-                },
-              },
-            },
-          ])
-          .toArray();
-
-        const totalRaisedCredits = raisedResult[0]?.totalRaisedCredits || 0;
-
-        // ===============================
-        // GET ALREADY REQUESTED WITHDRAWALS
-        // ===============================
-
-        const withdrawalsCollection = db.collection("withdrawals");
-
-        const previousWithdrawals = await withdrawalsCollection
-          .find({
-            creator_email: email,
-            status: {
-              $in: ["pending", "approved"],
-            },
-          })
-          .toArray();
-
-        const alreadyWithdrawnCredits = previousWithdrawals.reduce(
-          (total, withdrawal) => {
-            return total + Number(withdrawal.withdrawal_credit || 0);
-          },
-          0,
-        );
-
-        // ===============================
-        // CALCULATE AVAILABLE CREDITS
-        // ===============================
-
-        const availableCredits = totalRaisedCredits - alreadyWithdrawnCredits;
-
-        // ===============================
-        // CHECK AVAILABLE BALANCE
-        // ===============================
-
-        if (credits > availableCredits) {
-          return res.status(400).json({
-            success: false,
-            message: `Insufficient raised credits. You have ${availableCredits} credits available for withdrawal.`,
-          });
-        }
-
-        // ===============================
-        // CALCULATE WITHDRAWAL AMOUNT
-        // ===============================
-
-        // 20 credits = $1
-        const amount = credits / 20;
-
-        // ===============================
-        // CREATE WITHDRAWAL
-        // ===============================
-
-        const withdrawal = {
-          creator_email: email,
-          creator_name,
-
-          withdrawal_credit: credits,
-          withdrawal_amount: amount,
-
-          payment_system,
-          account_number,
-
-          withdraw_date: new Date(withdraw_date || Date.now()),
-
-          status: "pending",
-
-          createdAt: new Date(),
-        };
-
-        const result = await withdrawalsCollection.insertOne(withdrawal);
-
-        res.status(201).json({
-          success: true,
-          message: "Withdrawal request submitted successfully.",
-          withdrawalId: result.insertedId,
-
-          totalRaisedCredits,
-          alreadyWithdrawnCredits,
-          availableCredits: availableCredits - credits,
-
-          withdrawal: {
-            credits,
-            amount,
-          },
-        });
-      } catch (error) {
-        console.error("Withdrawal error:", error);
-
-        res.status(500).json({
+      if (!withdrawal_credit || !payment_system || !account_number) {
+        return res.status(400).json({
           success: false,
-          message: "Failed to create withdrawal.",
-          error: error.message,
+          message: "All withdrawal fields are required.",
         });
       }
-    });
+
+      const email = req.user.email.toLowerCase();
+      const credits = Number(withdrawal_credit);
+
+      if (!Number.isFinite(credits)) {
+        return res.status(400).json({ success: false, message: "Invalid withdrawal credits." });
+      }
+      if (credits < 200) {
+        return res.status(400).json({ success: false, message: "Minimum withdrawal is 200 credits." });
+      }
+      if (credits % 20 !== 0) {
+        return res.status(400).json({ success: false, message: "Withdrawal credits must be a multiple of 20." });
+      }
+
+      const creator = await userCollection.findOne({ email });
+
+      if (!creator) {
+        return res.status(404).json({ success: false, message: "Creator not found." });
+      }
+      if (creator.role !== "Creator") {
+        return res.status(403).json({ success: false, message: "Only creators can withdraw." });
+      }
+
+      const raisedResult = await campaignCollection
+        .aggregate([
+          { $match: { creator_email: email, status: "approved" } },
+          { $group: { _id: null, totalRaisedCredits: { $sum: { $ifNull: ["$raised_amount", 0] } } } },
+        ])
+        .toArray();
+
+      const totalRaisedCredits = raisedResult[0]?.totalRaisedCredits || 0;
+
+      const withdrawalsCollection = db.collection("withdrawals");
+
+      const previousWithdrawals = await withdrawalsCollection
+        .find({ creator_email: email, status: { $in: ["pending", "approved"] } })
+        .toArray();
+
+      const alreadyWithdrawnCredits = previousWithdrawals.reduce(
+        (total, w) => total + Number(w.withdrawal_credit || 0),
+        0
+      );
+
+      const availableCredits = totalRaisedCredits - alreadyWithdrawnCredits;
+
+      if (credits > availableCredits) {
+        return res.status(400).json({
+          success: false,
+          message: `Insufficient raised credits. You have ${availableCredits} credits available for withdrawal.`,
+        });
+      }
+
+      const amount = credits / 20;
+
+      const withdrawal = {
+        creator_email: email,
+        creator_name: req.user.name,
+        withdrawal_credit: credits,
+        withdrawal_amount: amount,
+        payment_system,
+        account_number,
+        withdraw_date: new Date(withdraw_date || Date.now()),
+        status: "pending",
+        createdAt: new Date(),
+      };
+
+      const result = await withdrawalsCollection.insertOne(withdrawal);
+
+      res.status(201).json({
+        success: true,
+        message: "Withdrawal request submitted successfully.",
+        withdrawalId: result.insertedId,
+        totalRaisedCredits,
+        alreadyWithdrawnCredits,
+        availableCredits: availableCredits - credits,
+        withdrawal: { credits, amount },
+      });
+    } catch (error) {
+      console.error("Withdrawal error:", error);
+      res.status(500).json({ success: false, message: "Failed to create withdrawal.", error: error.message });
+    }
+  }
+);
 
     // Get creator payment history
-    app.get("/api/withdrawals/creator/:email", async (req, res) => {
-      try {
-        const email = req.params.email.toLowerCase();
+  app.get(
+  "/api/withdrawals/creator",
+  verifyAuthToken,
+  requireRole("Creator"),
+  async (req, res) => {
+    try {
+      const email = req.user.email.toLowerCase();
 
-        const withdrawals = await db
-          .collection("withdrawals")
-          .find({ creator_email: email })
-          .sort({ withdraw_date: -1 })
-          .toArray();
+      const withdrawals = await db
+        .collection("withdrawals")
+        .find({ creator_email: email })
+        .sort({ withdraw_date: -1 })
+        .toArray();
 
-        res.status(200).json(withdrawals);
-      } catch (error) {
-        console.error("Payment history error:", error);
-
-        res.status(500).json({
-          success: false,
-          message: "Failed to fetch payment history.",
-        });
-      }
-    });
+      res.status(200).json(withdrawals);
+    } catch (error) {
+      console.error("Payment history error:", error);
+      res.status(500).json({
+        success: false,
+        message: "Failed to fetch payment history.",
+      });
+    }
+  }
+);
 
     // ===============================
     // SUPPORTER HOME DASHBOARD
@@ -2299,32 +2192,33 @@ async function run() {
 
     // ==================== ADMIN - DELETE USER ====================
 
-    app.delete("/api/admin/users/:id",verifyAuthToken,
-  requireRole("Admin"), async (req, res) => {
-      try {
-        const { id } = req.params;
+    app.delete(
+  "/api/admin/users/:id",
+  verifyAuthToken,
+  requireRole("Admin"),
+  async (req, res) => {
+    try {
+      const { id } = req.params;
 
-        if (!ObjectId.isValid(id)) {
-          return res.status(400).json({
-            success: false,
-            message: "Invalid user ID.",
-          });
-        }
+      if (!ObjectId.isValid(id)) {
+        return res.status(400).json({ success: false, message: "Invalid user ID." });
+      }
 
-        const user = await userCollection.findOne({
-          _id: new ObjectId(id),
+      const user = await userCollection.findOne({ _id: new ObjectId(id) });
+
+      if (!user) {
+        return res.status(404).json({ success: false, message: "User not found." });
+      }
+
+      if (user.email === req.user.email) {
+        return res.status(400).json({
+          success: false,
+          message: "You cannot delete your own account.",
         });
+      }
 
-        if (!user) {
-          return res.status(404).json({
-            success: false,
-            message: "User not found.",
-          });
-        }
-
-        const result = await userCollection.deleteOne({
-          _id: new ObjectId(id),
-        });
+      const result = await userCollection.deleteOne({ _id: new ObjectId(id) });
+     
 
         if (result.deletedCount === 0) {
           return res.status(400).json({
